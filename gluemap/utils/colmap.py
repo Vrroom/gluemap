@@ -824,3 +824,48 @@ def write_to_colmap_format(
     )
 
     reconstruction.write(dir_write)
+
+
+def colorize_reconstruction(
+    reconstruction: pycolmap.Reconstruction,
+    images_path: str | Path,
+) -> int:
+    """Assign per-point RGB by sampling source images at track observations.
+
+    gluemap's triangulation leaves every ``Point3D`` with the default colour
+    ``(0, 0, 0)`` (the pipeline is geometry-only). This samples each point's
+    track observations from the images under ``images_path`` -- the mean
+    colour across observations -- via
+    :meth:`pycolmap.Reconstruction.extract_colors_for_all_images`, mutating
+    ``reconstruction`` in place. ``image.name`` is resolved relative to
+    ``images_path`` (so a parent dir works for multi-sequence layouts).
+
+    Args:
+        reconstruction: Reconstruction to colourise in place.
+        images_path: Directory holding the source images, named to match
+            ``image.name`` in the reconstruction.
+
+    Returns:
+        Number of points still left black after colourisation.
+
+    Raises:
+        NotADirectoryError: If ``images_path`` is not a directory.
+    """
+    images_path = str(images_path)
+    if not os.path.isdir(images_path):
+        raise NotADirectoryError(
+            f"colorize_reconstruction: image dir not found: {images_path}"
+        )
+
+    reconstruction.extract_colors_for_all_images(images_path)
+
+    n_black = sum(
+        1 for p in reconstruction.points3D.values() if not any(p.color)
+    )
+    logger.info(
+        "Colorized reconstruction from %s (%d/%d points left black)",
+        images_path,
+        n_black,
+        reconstruction.num_points3D(),
+    )
+    return n_black

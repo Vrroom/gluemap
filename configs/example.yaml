@@ -5,7 +5,7 @@
 _base_: base.yaml
 
 # IO
-images_path: /path/to/images
+images_path: /home/salmonuser/Data/Misc/Rocks/
 write_path: results/
 
 # Ground truth intrinsics

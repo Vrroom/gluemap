@@ -93,6 +93,12 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="whether the images are sequentially ordered",
     )
     parser.add_argument(
+        "--colorize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="sample per-point RGB from source images for the final model",
+    )
+    parser.add_argument(
         "--sample_frequency",
         type=int,
         default=1,
