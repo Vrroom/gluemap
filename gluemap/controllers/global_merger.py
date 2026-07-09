@@ -9,12 +9,16 @@ from gluemap.estimators.intrinsics_averaging import intrinsics_averaging
 from gluemap.estimators.rotation_averaging import (
     rotation_averaging,
     rotation_averaging_pycolmap,
+    rotation_averaging_pycolmap_with_rig,
 )
 from gluemap.estimators.similarity_averaging import (
     similarity_averaging,
 )
 from gluemap.math.geometry import restore_identity
-from gluemap.math.mst_initialization import initialize_mst_structures
+from gluemap.math.mst_initialization import (
+    initialize_mst_structures,
+    initialize_mst_structures_with_rig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,7 @@ class GlobalGluer:
         self.use_ceres_rotation_averaging = getattr(
             args, "use_ceres_rotation_averaging", False
         )
+        self.rig = getattr(args, "rig", None)
 
     def main(
         self,
@@ -303,18 +308,31 @@ class GlobalGluer:
                 predictions_dict, global_rotations
             )
             self._filter_invalid_edges(predictions_dict, global_rotations)
-        else:
+        elif self.rig is None:
             global_rotations = rotation_averaging_pycolmap(
                 predictions_dict, max_rotation_error_deg=self.max_rot_error
+            )
+            self._filter_invalid_edges(predictions_dict, global_rotations)
+        else:
+            # (sumit): Added branch for rig based rotation averaging.
+            global_rotations = rotation_averaging_pycolmap_with_rig(
+                predictions_dict, max_rotation_error_deg=self.max_rot_error, rig=self.rig
             )
             self._filter_invalid_edges(predictions_dict, global_rotations)
 
         self._prune_invisible_pairs(predictions_dict)
 
         # Initialize the structures by maximum spanning tree
-        global_centers, global_scales = initialize_mst_structures(
-            predictions_dict, global_rotations
-        )
+        import pdb
+        pdb.set_trace()
+        if self.rig is None:
+            global_centers, global_scales = initialize_mst_structures(
+                predictions_dict, global_rotations
+            )
+        else:
+            global_centers, global_scales = initialize_mst_structures_with_rig(
+                predictions_dict, global_rotations, rig=self.rig
+            )
 
         global_centers = similarity_averaging(
             predictions_dict,
@@ -322,6 +340,7 @@ class GlobalGluer:
             global_centers=global_centers,
             global_scales=global_scales,
             max_num_iterations=200,
+            rig=self.rig,
         )
 
         # Prune the edges by the global rotations

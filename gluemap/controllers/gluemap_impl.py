@@ -14,6 +14,7 @@ from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.twoview_inference import run_twoview_inference
 from gluemap.datasets.star import BaseStarDataset
 from gluemap.datasets.twoview import BaseTwoViewDataset
+from gluemap.datasets.utils import get_image_list
 from gluemap.estimators.rotation_averaging import (
     collect_relative_rotations_ministar,
 )
@@ -28,6 +29,7 @@ from gluemap.utils.colmap import (
     prepare_sift_database,
     write_to_colmap_format,
 )
+from gluemap.utils.rigs import bind_rig_spec, load_rig_spec
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +224,7 @@ class GluemapPipeline:
             dataset.image_index_to_star_index
         )
 
-        global_gluer = GlobalGluer(args)
+        global_gluer = GlobalGluer(args) # (sumit): I think this is motion averaging.
         global_gluer.sequential_edges = set(
             getattr(dataset_pair, "sequential_edges", [])
         )
@@ -398,6 +400,12 @@ def run_inference_pipeline(
     models: dict[str, torch.nn.Module] | None = None,
 ) -> tuple[str | None, dict]:
     """Backward-compatible wrapper for GluemapPipeline.run()."""
+    rig_config_path = getattr(args, "rig_config_path", None)
+    if rig_config_path is not None:
+        spec = load_rig_spec(rig_config_path)
+        args.rig = bind_rig_spec(spec, get_image_list(args.images_path))
+    else:
+        args.rig = None
     pipeline = GluemapPipeline(
         args, world_size, rank, device, dtype, models=models
     )

@@ -56,6 +56,37 @@ def quaternion_to_rotation_matrix(
         return Rotation.from_quat(q).as_matrix()
 
 
+def average_rotations_so3(
+    rotations: np.ndarray,
+    weights: np.ndarray,
+    max_residual_deg: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    rotations = np.asarray(rotations, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    assert rotations.ndim == 3 and rotations.shape[1:] == (3, 3), (
+        f"(average_rotations_so3): expected (N, 3, 3), got {rotations.shape}"
+    )
+    assert weights.shape == (rotations.shape[0],), (
+        f"(average_rotations_so3): {weights.shape} weights for {rotations.shape[0]} rotations"
+    )
+    assert np.all(weights > 0), f"(average_rotations_so3): weights must be positive, got {weights}"
+
+    def residuals_to(mean: Rotation) -> np.ndarray:
+        return np.degrees((mean.inv() * Rotation.from_matrix(rotations)).magnitude())
+
+    mean = Rotation.from_matrix(rotations).mean(weights=weights)
+    residuals = residuals_to(mean)
+    if max_residual_deg is not None:
+        keep = residuals <= max_residual_deg
+        assert keep.any(), (
+            f"(average_rotations_so3): all members rejected at {max_residual_deg} deg, residuals {residuals}"
+        )
+        if not keep.all():
+            mean = Rotation.from_matrix(rotations[keep]).mean(weights=weights[keep])
+            residuals = residuals_to(mean)
+    return mean.as_matrix(), residuals
+
+
 def restore_identity(extrinsics: torch.Tensor) -> torch.Tensor:
     """Compose out the first view's pose so that view 0 is identity.
 

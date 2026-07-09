@@ -6,9 +6,13 @@ maximises the per-edge confidence, and walks the tree to seed each image's
 global centre and scale before similarity averaging refines them.
 """
 
+import pickle
+
 import networkx as nx
 import numpy as np
 import torch
+
+from gluemap.utils.rigs import BoundRig, fold_graph
 
 # Minimum median triangulation angle (degrees) for an edge's relative scale
 # to be considered reliable; below this we fall back to a unit scale ratio.
@@ -85,7 +89,7 @@ def initialize_mst_structures(
             else np.array([])
         )
 
-    for idx in indexes:
+    for idx in indexes: # means star index
         poses = predictions_dict["extrinsics"][idx]
         pose_scores = predictions_dict["pose_scores"][idx]
         N_poses = poses.shape[1]
@@ -192,5 +196,309 @@ def initialize_mst_structures(
         )
 
         stack.append((neighbor, iter(mst.neighbors(neighbor))))
+
+    with open("centers.pkl", "wb") as fh:
+        pickle.dump(global_centers, fh)
+
+    return global_centers, global_scales
+
+
+def find_metric_anchor(rel_poses: dict, rig: BoundRig) -> tuple[int, float] | None:
+    for (i, j), (pose, star_idx, _slot, _score) in rel_poses.items():
+        if i == j or rig.ref_of[i] != rig.ref_of[j]:
+            continue
+        Mi = rig.sensor_from_ref_of(i)
+        Mj = rig.sensor_from_ref_of(j)
+        ci = -Mi[:3, :3].T @ Mi[:3, 3]
+        cj = -Mj[:3, :3].T @ Mj[:3, 3]
+        L = np.linalg.norm(ci - cj)
+        if L <= 1e-6:
+            continue
+        return star_idx, float(np.linalg.norm(pose[:3, 3].numpy()) / L)
+    return None
+
+
+def seed_star_scales(
+    rel_poses: dict,
+    scales: dict,
+    node_idx_to_star_idx: dict,
+    anchor: tuple[int, float] | None,
+) -> dict[int, float]:
+    """Chain per-star scales over the star MST, seeded at the metric anchor."""
+    if anchor is None:
+        root, s = 0, 1.0
+    else:
+        star_idx, s = anchor
+        root = {v: k for k, v in node_idx_to_star_idx.items()}[star_idx]
+
+    G = nx.Graph()
+    G.add_nodes_from(node_idx_to_star_idx.keys())
+    for (i, j), (_pose, _idx, _i_pos, score) in rel_poses.items():
+        G.add_edge(i, j, weight=score)
+    nx.set_edge_attributes(
+        G,
+        {(i, j): score for (i, j), (_, _, _, score) in rel_poses.items()},
+        "weight",
+    )
+    mst = nx.maximum_spanning_tree(G)
+
+    global_scales = {}
+    visited = set()
+
+    # Iterative DFS to avoid RecursionError on large graphs
+    global_scales[node_idx_to_star_idx[root]] = s
+    visited.add(root)
+    stack = [(root, iter(mst.neighbors(root)))]
+
+    while stack:
+        node, neighbors_iter = stack[-1]
+        try:
+            neighbor = next(neighbors_iter)
+        except StopIteration:
+            stack.pop()
+            continue
+
+        if neighbor in visited:
+            continue
+
+        visited.add(neighbor)
+        idx_node = node_idx_to_star_idx[neighbor]
+        idx_parent = node_idx_to_star_idx[node]
+
+        if idx_node in global_scales:
+            global_scales[idx_parent] = (
+                global_scales[idx_node] * scales[(idx_node, idx_parent)]
+            )
+        else:
+            global_scales[idx_node] = (
+                global_scales[idx_parent] * scales[(idx_parent, idx_node)]
+            )
+
+        stack.append((neighbor, iter(mst.neighbors(neighbor))))
+
+    return global_scales
+
+
+def add_member_centers(
+    reference_centers: dict[int, np.ndarray],
+    global_rotations: dict[int, np.ndarray],
+    rig: BoundRig,
+) -> dict[int, np.ndarray]:
+    """Place every image at its reference centre plus the known rig offset."""
+    global_centers = {}
+    for idx in global_rotations:
+        r = rig.ref_of[idx]
+        M = rig.sensor_from_ref_of(idx)
+        R = global_rotations[r]
+
+        rc = reference_centers[r]
+
+        m_in_ref = -M[:3, :3].T @ M[:3, 3]
+        delta_in_w = R.T @ m_in_ref
+
+        global_centers[idx] = rc + delta_in_w
+    return global_centers
+
+
+def walk_reference_centers(
+    rel_poses: dict,
+    global_rotations: dict[int, np.ndarray],
+    global_scales: dict[int, float],
+    rig: BoundRig,
+) -> dict[int, np.ndarray]:
+    """Walk the folded reference MST, setting each reference centre from its parent's."""
+    # Build the image graph, edges weighted by pose score
+    G = nx.Graph()
+    G.add_nodes_from(rig.ref_of.keys())
+    for (i, j), (_pose, _idx, _i_pos, score) in rel_poses.items():
+        G.add_edge(i, j, weight=score, pair=(i, j))
+    nx.set_edge_attributes(
+        G,
+        {(i, j): score for (i, j), (_, _, _, score) in rel_poses.items()},
+        "weight",
+    )
+
+    # Collapse each image onto its rig reference
+    folded_multigraph = fold_graph(G, rig.ref_of)
+
+    # Keep one edge per reference pair: the highest-score image edge, pose and star intact
+    folded_graph = nx.Graph()
+    folded_graph.add_nodes_from(folded_multigraph.nodes())
+    for ra, rb, data in folded_multigraph.edges(data=True):
+        if (
+            folded_graph.has_edge(ra, rb)
+            and folded_graph[ra][rb]["weight"] >= data["weight"]
+        ):
+            continue
+        folded_graph.add_edge(ra, rb, weight=data["weight"], pair=data["pair"])
+
+    assert nx.is_connected(folded_graph), (
+        f"(walk_reference_centers): folded reference graph is disconnected, "
+        f"{nx.number_connected_components(folded_graph)} components"
+    )
+
+    # Max spanning tree over the references
+    mst = nx.maximum_spanning_tree(folded_graph)
+
+    root = rig.ref_of[0] 
+
+    # Walk each reference from its parent: c_child = c_parent + t_hat/s + delta_i - delta_j
+    global_centers = {}
+    visited = set()
+
+    # Iterative DFS to avoid RecursionError on large graphs
+    global_centers[root] = np.zeros((3,), dtype=np.float64)
+    visited.add(root)
+    stack = [(root, iter(mst.neighbors(root)))]
+
+    while stack:
+        node, neighbors_iter = stack[-1]
+        try:
+            neighbor = next(neighbors_iter)
+        except StopIteration:
+            stack.pop()
+            continue
+
+        if neighbor in visited:
+            continue
+
+        visited.add(neighbor)
+
+        i, j = mst[node][neighbor]["pair"] 
+        if rig.ref_of[i] != node:
+            i, j = j, i
+
+        # Diagram in my head: node -> i -> j -> neighbor
+        pose, star, _slot, _score = rel_poses[(i, j)]
+        t_hat = -global_rotations[j].T @ pose[:3, 3].numpy()
+        s = global_scales[star]
+
+        Mi = rig.sensor_from_ref_of(i)
+        Mj = rig.sensor_from_ref_of(j)
+        delta_i = global_rotations[node].T @ (-Mi[:3, :3].T @ Mi[:3, 3])
+        delta_j = global_rotations[neighbor].T @ (-Mj[:3, :3].T @ Mj[:3, 3])
+
+        global_centers[neighbor] = (
+            global_centers[node] + t_hat / s + delta_i - delta_j
+        )
+
+        stack.append((neighbor, iter(mst.neighbors(neighbor))))
+
+    return global_centers
+
+def initialize_mst_structures_with_rig(
+    predictions_dict: dict,
+    global_rotations: dict[int, np.ndarray],
+    rig: BoundRig,
+) -> tuple[dict[int, np.ndarray], dict[int, float]]:
+    """Rig-based variant of :func:`initialize_mst_structures`."""
+    indexes = range(len(predictions_dict["indexes"]))
+
+    rel_poses = {}
+    scales = {}  # (i,j): s_j / s_i
+    node_idx_to_star_idx = {}
+    predictions_dict["median_tri_angle"] = {}
+
+    for star_idx, idx in enumerate(indexes):
+        node_idx_to_star_idx[predictions_dict["indexes"][idx][0]] = star_idx
+
+        # Compute max of median triangulation angle across edges
+        points3d = predictions_dict["points3d_virtual"][idx][0]  # (K, 3)
+        extr = predictions_dict["extrinsics"][idx]  # (1, N, 3, 4)
+
+        ray_center = points3d / torch.clamp(
+            points3d.norm(dim=-1, keepdim=True), min=1e-8
+        )  # (K, 3)
+
+        # Vectorized over all neighbor views
+        R_all = extr[0, 1:, :3, :3]  # (M, 3, 3)
+        t_all = extr[0, 1:, :3, 3]  # (M, 3)
+        c_all = -torch.einsum("mji,mj->mi", R_all, t_all)  # (M, 3)
+
+        ray_all = points3d.unsqueeze(0) - c_all.unsqueeze(1)  # (M, K, 3)
+        ray_all = ray_all / torch.clamp(
+            ray_all.norm(dim=-1, keepdim=True), min=1e-8
+        )
+        cos_angles = torch.clamp(
+            torch.einsum("kd,mkd->mk", ray_center, ray_all),
+            -1.0 + 1e-6,
+            1.0 - 1e-6,
+        )  # (M, K)
+        angles = torch.acos(cos_angles)  # (M, K)
+        median_angles = (
+            angles.median(dim=-1).values
+            if angles.numel() > 0
+            else torch.tensor([])
+        )  # (M,)
+
+        predictions_dict["median_tri_angle"][idx] = (
+            np.rad2deg(median_angles)
+            if median_angles.numel() > 0
+            else np.array([])
+        )
+
+    for idx in indexes: # means star index
+        poses = predictions_dict["extrinsics"][idx]
+        pose_scores = predictions_dict["pose_scores"][idx]
+        N_poses = poses.shape[1]
+        idx_i = predictions_dict["indexes"][idx][0]
+        for i in range(N_poses):
+            if i == 0:
+                continue
+            idx_j = predictions_dict["indexes"][idx][i]
+            status = (idx_j, idx_i) not in rel_poses
+            star_idx_i = node_idx_to_star_idx[idx_i]
+            star_idx_j = node_idx_to_star_idx[idx_j]
+            score = pose_scores[0, i].item()
+            if not status:
+                # If either edge has a small triangulation angle, scale is
+                # unreliable
+                angle_current = predictions_dict["median_tri_angle"][
+                    star_idx_i
+                ][i - 1]
+                reverse_pos = rel_poses[(idx_j, idx_i)][2]
+                angle_reverse = predictions_dict["median_tri_angle"][
+                    star_idx_j
+                ][reverse_pos - 1]
+                if (
+                    angle_current < MIN_TRI_ANGLE
+                    or angle_reverse < MIN_TRI_ANGLE
+                ):
+                    scales[(star_idx_j, star_idx_i)] = 1.0
+                    scales[(star_idx_i, star_idx_j)] = 1.0
+                else:
+                    scales[(star_idx_j, star_idx_i)] = (
+                        poses[0, i, :3, 3:].norm().item()
+                        / rel_poses[(idx_j, idx_i)][0][:3, 3:].norm().item()
+                    )
+                    scales[(star_idx_i, star_idx_j)] = (
+                        1.0 / scales[(star_idx_j, star_idx_i)]
+                    )
+                score *= (
+                    min(20, angle_current, angle_reverse) / 20
+                )  # downweight the edge if the triangulation angle is small
+
+            rel_poses[(idx_i, idx_j)] = (poses[0, i].cpu(), idx, i, score)
+
+    # Only consider the two side edges
+    invalid_edges = []
+    for (i, j), _ in rel_poses.items():
+        if (node_idx_to_star_idx[i], node_idx_to_star_idx[j]) not in scales:
+            invalid_edges.append((i, j))
+
+    for i, j in invalid_edges:
+        del rel_poses[(i, j)]
+
+    import pdb
+    pdb.set_trace()
+    anchor = find_metric_anchor(rel_poses, rig)
+    global_scales = seed_star_scales(
+        rel_poses, scales, node_idx_to_star_idx, anchor
+    )
+    reference_centers = walk_reference_centers(rel_poses, global_rotations, global_scales, rig) 
+    global_centers = add_member_centers(reference_centers, global_rotations, rig)
+
+    with open("centers_with_rig.pkl", "wb") as fh:
+        pickle.dump(global_centers, fh)
 
     return global_centers, global_scales

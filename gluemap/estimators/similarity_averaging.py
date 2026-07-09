@@ -5,6 +5,8 @@ import pyceres
 import pygluemap
 import torch
 
+from gluemap.utils.rigs import BoundRig
+
 logger = logging.getLogger(__name__)
 # Minimum angle (in degrees) for a triangle to be considered valid for
 # scale estimation
@@ -227,6 +229,7 @@ def similarity_averaging(
     global_scales: list[np.ndarray] | dict[int, float] | None = None,
     max_num_iterations: int = 50,
     fix_scales: bool = False,
+    rig: BoundRig | None = None,
 ) -> dict[int, np.ndarray]:
     """
     Solve for global per-image translations and per-ministar scales.
@@ -246,6 +249,7 @@ def similarity_averaging(
         max_num_iterations: Max Ceres iterations.
         fix_scales: If True, freeze every ministar scale (useful when only
             translations should move).
+        rig: Optional bound rig spec.
 
     Returns:
         The updated ``global_centers`` mapping (also written in place).

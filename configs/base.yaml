@@ -42,6 +42,9 @@ skip_doppelgangers: false
 # Ground truth intrinsics
 use_gt_intrinsics: false
 
+# Rig constraints
+rig_config_path: null
+
 # Sequential mode
 is_sequential: false
 sample_frequency: 1

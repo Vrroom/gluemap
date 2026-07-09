@@ -1,4 +1,5 @@
 import logging
+import pickle
 
 import networkx as nx
 import numpy as np
@@ -9,6 +10,7 @@ import torch
 from scipy.spatial.transform import Rotation
 
 from gluemap.math.geometry import (
+    average_rotations_so3,
     quaternion_to_rotation_matrix,
     rotation_matrix_to_quaternion,
 )
@@ -304,7 +306,7 @@ def rotation_averaging_pycolmap(
             .astype(np.float64)
         )
         R = pose_3x4[:3, :3]
-        t = pose_3x4[:3, 3]
+        t = pose_3x4[:3, 3] # (sumit): I verified that this value doesn't impact the solver.
         quat = Rotation.from_matrix(R).as_quat()  # (x, y, z, w)
         rigid = pycolmap.Rigid3d(
             rotation=np.array([quat[0], quat[1], quat[2], quat[3]]),
@@ -335,5 +337,138 @@ def rotation_averaging_pycolmap(
             )
         else:
             rotations[idx] = np.eye(3, dtype=np.float64)
+
+    return rotations
+
+def rotation_averaging_pycolmap_with_rig(
+    prediction_dict: dict,
+    max_rotation_error_deg: float = 5.0,
+    rig=None,
+) -> dict[int, np.ndarray]:
+    """
+    Rotation averaging using pycolmap's L1+IRLS solver with MST initialization.
+
+    Args:
+        prediction_dict: Star inference output with ``"indexes"``,
+            ``"pose_scores"`` and ``"extrinsics"``.
+        max_rotation_error_deg: Inlier threshold passed to
+            ``pycolmap.RotationEstimatorOptions``.
+
+    Returns:
+        Mapping ``image_id -> 3x3 rotation matrix`` (float64 numpy array);
+        identity for images without an estimated pose.
+    """
+    logger.info("Rotation averaging with pycolmap and rig ...")
+
+    assert rig is not None, f'(rotation_averaging_pycolmap_with_rig): somehow got None for rig' 
+
+    # Collect all image indexes
+    indexes = set(
+        prediction_dict["indexes"][i][j]
+        for i in range(len(prediction_dict["indexes"]))
+        for j in range(len(prediction_dict["indexes"][i]))
+    )
+
+    # Build a minimal Reconstruction: one dummy camera + one image per index
+    reconstruction = pycolmap.Reconstruction()
+    camera = pycolmap.Camera(
+        camera_id=0,
+        model="SIMPLE_PINHOLE",
+        width=1,
+        height=1,
+        params=[1.0, 0.0, 0.0],
+    )
+    reconstruction.add_camera_with_trivial_rig(camera)
+    ref_indexes = sorted({rig.ref_of[idx] for idx in indexes})
+    for idx in ref_indexes:
+        image = pycolmap.Image(image_id=idx, camera_id=0)
+        reconstruction.add_image_with_trivial_frame(image)
+
+    # Build PoseGraph: collect best-scoring edge per (i, j) pair
+    best_edges = {}  # (idx1, idx2) -> (score, star_idx, local_idx)
+    for idx_star in range(len(prediction_dict["indexes"])):
+        scores = prediction_dict["pose_scores"][idx_star][0]
+        idx1 = prediction_dict["indexes"][idx_star][0]
+        valid_j = torch.where(scores > 0.0)[0].tolist()
+        for j in valid_j:
+            idx2 = prediction_dict["indexes"][idx_star][j]
+            if idx1 == idx2:
+                continue
+            score = scores[j].item()
+            pair = (min(idx1, idx2), max(idx1, idx2))
+            if pair not in best_edges or score > best_edges[pair][0]:
+                best_edges[pair] = (score, idx_star, j, idx1, idx2)
+
+    # Fold edges into the rig reference.
+    Ms = {idx: rig.sensor_from_ref_of(idx) for idx in indexes}
+    bundles = {}
+    for _pair, (score, idx_star, j, idx1, idx2) in best_edges.items():
+        r1, r2 = rig.ref_of[idx1], rig.ref_of[idx2]
+        if r1 == r2:
+            continue
+        T = np.eye(4)
+        T[:3] = (
+            prediction_dict["extrinsics"][idx_star][0, j, :3]
+            .cpu()
+            .numpy()
+            .astype(np.float64)
+        )
+        T = np.linalg.inv(Ms[idx2]) @ T @ Ms[idx1]
+        if r1 > r2:
+            T = np.linalg.inv(T)
+        bundles.setdefault((min(r1, r2), max(r1, r2)), []).append((T, score)) # multi-edges appended to list
+
+    # Do rotation averaging of multi-edges
+    reject_deg = 2.0 * max_rotation_error_deg
+    merged = {}
+    for pair, bundle in bundles.items():
+        Rs = np.stack([T[:3, :3] for T, _ in bundle])
+        ws = np.array([s for _, s in bundle])
+        R_mean, residuals = average_rotations_so3(Rs, ws, max_residual_deg=reject_deg)
+        inliers = residuals <= reject_deg
+        merged[pair] = (R_mean, float(ws[inliers].sum()))
+        logger.debug(
+            f"rig bundle {pair}: {len(bundle)} edges, "
+            f"max spread {residuals.max():.2f} deg, {int(inliers.sum())} inliers"
+        )
+
+    pose_graph = pycolmap.PoseGraph()
+    for (r1, r2), (R_mean, weight) in merged.items():
+        quat = Rotation.from_matrix(R_mean).as_quat()  # (x, y, z, w)
+        rigid = pycolmap.Rigid3d(rotation=quat, translation=np.zeros(3)) # translation doesn't matter
+        edge = pycolmap.PoseGraphEdge(cam2_from_cam1=rigid)
+        edge.num_matches = max(int(weight * 1000), 1)
+        pose_graph.add_edge(r1, r2, edge)
+
+    # Configure options
+    options = pycolmap.RotationEstimatorOptions()
+    options.max_rotation_error_deg = max_rotation_error_deg
+    options.weight_type = pycolmap.RotationWeightType.GEMAN_MCCLURE
+
+    # Solve
+    success = pycolmap.run_rotation_averaging(
+        options, pose_graph, reconstruction, []
+    )
+    logger.info(f"Rotation averaging {'succeeded' if success else 'failed'}")
+
+    # Extract reference rotations, then expand to members by composition
+    ref_rotations = {}
+    for idx in ref_indexes:
+        frame = reconstruction.frames[idx]
+        if frame.has_pose():
+            ref_rotations[idx] = np.array(
+                frame.rig_from_world.rotation.matrix(), dtype=np.float64
+            )
+    rotations = {}
+    for idx in indexes:
+        r = rig.ref_of[idx]
+        if r in ref_rotations:
+            rotations[idx] = Ms[idx][:3, :3] @ ref_rotations[r]
+        else:
+            rotations[idx] = np.eye(3, dtype=np.float64)
+
+    with open("rotations_with_rig.pkl", "wb") as fh:
+        pickle.dump(rotations, fh)
+    logger.info("Dumped rotations to rotations_with_rig.pkl")
 
     return rotations

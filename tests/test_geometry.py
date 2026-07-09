@@ -6,6 +6,7 @@ import torch
 from scipy.spatial.transform import Rotation
 
 from gluemap.math.geometry import (
+    average_rotations_so3,
     bilinear_interpolate_value,
     project,
     project_tracks,
@@ -173,3 +174,47 @@ def test_project_tracks_angle_thresholding():
     # is_negative flag tracks behind-camera points (z < 0).
     assert neg[3] is True
     assert neg[0] is False
+
+
+def plot_rotated_x_axes(angles: list, Rs: np.ndarray, mean: np.ndarray) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    for a, R in zip(angles, Rs):
+        ax.annotate("", xytext=(0, 0), xy=(R[0, 0], R[1, 0]),
+                    arrowprops=dict(arrowstyle="->", color="0.55", lw=1.4))
+        ax.text(1.06 * R[0, 0], 1.06 * R[1, 0], f"{a:g}\N{DEGREE SIGN}",
+                fontsize=9, ha="center", color="0.35")
+    ax.annotate("", xytext=(0, 0), xy=(mean[0, 0], mean[1, 0]),
+                arrowprops=dict(arrowstyle="->", color="#0E7A6B", lw=2.4))
+    ax.text(1.12 * mean[0, 0], 1.12 * mean[1, 0], "mean", fontsize=10,
+            ha="center", color="#0E7A6B", weight="bold")
+    ax.add_patch(plt.Circle((0, 0), 1.0, fill=False, color="0.85", lw=0.8))
+    ax.set_xlim(-0.15, 1.2)
+    ax.set_ylim(-0.15, 1.2)
+    ax.set_aspect("equal")
+    ax.set_title("rotated x-axes: Rz(30/32/34) and their SO(3) mean")
+    out = Path(__file__).parent.parent / "Debug" / "so3_mean_directions.png"
+    out.parent.mkdir(exist_ok=True)
+    fig.savefig(out, dpi=130, bbox_inches="tight", pad_inches=0.2)
+    plt.close(fig)
+
+
+def test_average_rotations_so3_z_axis():
+    angles = [30.0, 32.0, 34.0]
+    Rs = np.stack(
+        [Rotation.from_euler("z", a, degrees=True).as_matrix() for a in angles]
+    )
+    mean, residuals = average_rotations_so3(Rs, np.ones(3))
+    expected = Rotation.from_euler("z", 32.0, degrees=True).as_matrix()
+    print("Rz(30):")
+    print(Rs[0])
+    print("mean:")
+    print(mean)
+    assert np.allclose(mean, expected, atol=1e-9), mean
+    assert np.allclose(residuals, [2.0, 0.0, 2.0], atol=1e-9), residuals
+    plot_rotated_x_axes(angles, Rs, mean)

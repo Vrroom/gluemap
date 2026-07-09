@@ -5,8 +5,9 @@
 _base_: base.yaml
 
 # IO
-images_path: /home/salmonuser/Data/Misc/Rocks/
-write_path: results/
+images_path: /home/salmonuser/DigitalTwins/gluemap/Debug/LegoTractor/images/
+write_path: results/legotractor/
+rig_config_path: /home/salmonuser/DigitalTwins/gluemap/Debug/LegoTractor/schema.yaml
 
 # Ground truth intrinsics
 gt_intrinsics_path: null

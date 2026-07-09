@@ -218,10 +218,17 @@ class StarCollector:
         old_to_new = {old: new for new, old in enumerate(kept)}
         keep_set = largest_cc  # set membership lookup
 
-        logger.warning(
-            f"Covisibility graph disconnected; keeping largest CC "
-            f"({len(kept)}/{N} images)"
-        )
+        if len(kept) < N:
+            logger.warning(
+                f"Covisibility graph disconnected; keeping largest CC "
+                f"({len(kept)}/{N} images). Image indices no longer match "
+                f"the input image list."
+            )
+            assert getattr(self.args, "rig", None) is None, (
+                "(_restrict_to_largest_component): index remap would silently "
+                "desynchronize the bound rig (ref_of/sensor_from_ref keyed by "
+                "original indices); aborting"
+            )
 
         # Re-index valid edges (defensively filter; edges should lie within a
         # component)
