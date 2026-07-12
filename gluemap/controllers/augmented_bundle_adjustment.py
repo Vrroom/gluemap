@@ -20,6 +20,7 @@ from gluemap.math.reprojection_error import (
     filter_reconstruction_by_reprojection_error,
 )
 from gluemap.utils.colmap import camera_from_intrinsics_matrix
+from gluemap.utils.rigs import BoundRig
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,146 @@ def build_negative_depth_observations(
     return result
 
 
+def _build_reconstruction_for_ba_with_rig(
+    global_rotations: dict[int, np.ndarray],
+    global_centers: dict[int, np.ndarray],
+    global_intrinsics: list,
+    intrinsics_mapping: dict[int, int],
+    points3D: dict[int, pycolmap.Point3D],
+    keypoints_per_image: dict[int, np.ndarray],
+    rig: BoundRig,
+    image_sizes: list[tuple[int, int]] | None = None,
+    images_list: list[str] | None = None,
+    camera_model: str = "SIMPLE_PINHOLE",
+) -> pycolmap.Reconstruction:
+    """Build a reconstruction with real rigs and frames from a BoundRig.
+
+    Member image poses are derived as sensor_from_rig o rig_from_world, so only
+    the reference image of each frame carries a pose. Same 0-indexed inputs and
+    1-indexed output convention as build_reconstruction_for_ba.
+    """
+    reconstruction = pycolmap.Reconstruction()
+
+    # Each rig sensor is its own COLMAP camera with a distinct camera_id, even
+    # when sensors share intrinsics: COLMAP requires a rig's sensors to be
+    # distinct cameras. Assign camera_ids by sensor order.
+    sensor_to_camera_id = {
+        sensor: rig.camera_id_of(sensor) for sensor in rig.spec.sensors
+    }
+
+    # One camera per sensor, sourced from a representative posed image of that
+    # sensor. Intrinsics are duplicated when sensors share a model.
+    sensor_repr = {}
+    for idx in global_rotations:
+        if idx in intrinsics_mapping:
+            sensor_repr.setdefault(rig.sensor_of[idx], idx)
+
+    for sensor, camera_id in sensor_to_camera_id.items():
+        assert sensor in sensor_repr, (
+            f"(_build_reconstruction_for_ba_with_rig): sensor {sensor} has no "
+            f"posed image to source intrinsics from"
+        )
+        repr_idx = sensor_repr[sensor]
+        intrinsics = global_intrinsics[intrinsics_mapping[repr_idx]]
+        width, height = None, None
+        if image_sizes is not None and repr_idx < len(image_sizes):
+            height, width = image_sizes[repr_idx]
+        camera = camera_from_intrinsics_matrix(
+            intrinsics[0], camera_model, width, height, camera_id
+        )
+        reconstruction.add_camera(camera)
+
+    # Build one pycolmap Rig per gluemap rig. The first member is the reference
+    # sensor; the others are added with their sensor_from_ref transform, which
+    # is what pycolmap calls sensor_from_rig.
+    CAMERA = pycolmap.SensorType.CAMERA
+    rigs = []
+    for rig_index, spec_rig in enumerate(rig.spec.rigs):
+        pyrig = pycolmap.Rig()
+        pyrig.rig_id = rig_index + 1
+        pyrig.add_ref_sensor(
+            pycolmap.sensor_t(CAMERA, sensor_to_camera_id[spec_rig.members[0]])
+        )
+        for member, M in zip(
+            spec_rig.members[1:], spec_rig.sensor_from_ref[1:]
+        ):
+            sensor_from_rig = pycolmap.Rigid3d(
+                pycolmap.Rotation3d(M[:3, :3]), M[:3, 3]
+            )
+            pyrig.add_sensor(
+                pycolmap.sensor_t(CAMERA, sensor_to_camera_id[member]),
+                sensor_from_rig,
+            )
+        rigs.append(pyrig)
+
+    rig_id_of_sensor = {
+        sensor: rig.rig_id_of(sensor) for sensor in rig.spec.sensors
+    }
+
+    # A frame is one rig captured at a single instant. In BoundRig every image
+    # points at its frame's reference image via ref_of, so images sharing a
+    # ref_of value form one frame. The frame pose is that reference image's
+    # cam_from_world; each member image is bound to its sensor slot.
+    members_by_frame = defaultdict(list)
+    for idx in global_rotations:
+        if idx not in global_centers or idx not in intrinsics_mapping:
+            continue
+        members_by_frame[rig.ref_of[idx]].append(idx)
+
+    frames = []
+    for ref_idx, member_idxs in members_by_frame.items():
+        R = global_rotations[ref_idx]
+        center = global_centers[ref_idx]
+        frame = pycolmap.Frame()
+        frame.frame_id = rig.frame_id_of(ref_idx)
+        frame.rig_id = rig_id_of_sensor[rig.sensor_of[ref_idx]]
+        frame.rig_from_world = pycolmap.Rigid3d(
+            pycolmap.Rotation3d(R), -R @ center
+        )
+        for idx in member_idxs:
+            sid = pycolmap.sensor_t(
+                CAMERA, sensor_to_camera_id[rig.sensor_of[idx]]
+            )
+            frame.add_data_id(pycolmap.data_t(sid, idx + 1))
+        frames.append(frame)
+
+    reconstruction.set_rigs_and_frames(rigs, frames)
+
+    # Add each image bound to its frame. A member's pose comes from the frame
+    # (sensor_from_rig o rig_from_world), so the image carries no pose itself.
+    for image_id in global_rotations:
+        if image_id not in global_centers or image_id not in intrinsics_mapping:
+            continue
+
+        image = pycolmap.Image()
+        image.image_id = image_id + 1
+        image.camera_id = sensor_to_camera_id[rig.sensor_of[image_id]]
+
+        if image_id in keypoints_per_image:
+            for xy in keypoints_per_image[image_id]:
+                image.points2D.append(pycolmap.Point2D(xy))
+
+        if images_list is not None and image_id < len(images_list):
+            image.name = images_list[image_id]
+        else:
+            image.name = str(image_id)
+
+        image.frame_id = rig.frame_id_of(image_id)
+        reconstruction.add_image(image)
+
+    # Add 3D points. Track elements arrive with 0-indexed image_ids; rebuild
+    # each track with image_id+1 so observations point to the 1-indexed images.
+    for point3D in points3D.values():
+        xyz = (
+            point3D.xyz.reshape(3, 1) if point3D.xyz.ndim == 1 else point3D.xyz
+        )
+        new_track = pycolmap.Track()
+        for elem in point3D.track.elements:
+            new_track.add_element(elem.image_id + 1, elem.point2D_idx)
+        reconstruction.add_point3D(xyz, new_track)
+
+    return reconstruction
+
 def build_reconstruction_for_ba(
     global_rotations: dict[int, np.ndarray],
     global_centers: dict[int, np.ndarray],
@@ -71,6 +212,7 @@ def build_reconstruction_for_ba(
     image_sizes: list[tuple[int, int]] | None = None,
     images_list: list[str] | None = None,
     camera_model: str = "SIMPLE_PINHOLE",
+    rig: BoundRig | None = None,
 ) -> pycolmap.Reconstruction:
     """
     Build pycolmap.Reconstruction from separate data structures.
@@ -94,10 +236,27 @@ def build_reconstruction_for_ba(
         images_list: List[str] of image filenames indexed by 0-indexed image_id
             - optional
         camera_model: Camera model string
+        rig: BoundRig describing the sensor/frame layout. When provided, emit
+            real rigs and frames (member poses derived from the reference
+            image); None keeps the trivial-frame build.
 
     Returns:
         pycolmap.Reconstruction with 1-indexed image_id / camera_id.
     """
+    if rig is not None:
+        return _build_reconstruction_for_ba_with_rig(
+            global_rotations,
+            global_centers,
+            global_intrinsics,
+            intrinsics_mapping,
+            points3D,
+            keypoints_per_image,
+            rig,
+            image_sizes=image_sizes,
+            images_list=images_list,
+            camera_model=camera_model,
+        )
+
     reconstruction = pycolmap.Reconstruction()
 
     # Add cameras (camera_id is 1-indexed in the output reconstruction)
