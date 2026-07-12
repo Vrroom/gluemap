@@ -301,6 +301,10 @@ class GlobalGluer:
             self._boost_sequential_edges(predictions_dict, boost_factor=2.0)
 
         if self.use_ceres_rotation_averaging:
+            assert self.rig is None, (
+                "(_global_structure_estimation): use_ceres_rotation_averaging "
+                "is rig-unaware and cannot be combined with a rig"
+            )
             # Original two-pass: RA -> filter -> RA -> filter
             global_rotations = rotation_averaging(predictions_dict)
             self._filter_invalid_edges(predictions_dict, global_rotations)
