@@ -15,15 +15,20 @@ def _update_poses_from_reconstruction(
     """
     Copy BA-optimized poses and camera intrinsics from source to target
     reconstruction. Matches images by name.
+
+    We propagate the rig reference poses. This works because when there is 
+    no rig, everyone is a rig. 
     """
     source_by_name = {
         img.name: (img_id, img) for img_id, img in source_recon.images.items()
     }
     for target_id, target_img in target_recon.images.items():
+        if not target_img.is_ref_in_frame():
+            continue
         if target_img.name in source_by_name:
             src_id, src_img = source_by_name[target_img.name]
             target_recon.frames[
-                target_id
+                target_img.frame_id
             ].rig_from_world = src_img.cam_from_world()
     # Copy camera intrinsics
     for cam_id, cam in source_recon.cameras.items():
@@ -86,7 +91,6 @@ def _pyceres_loss_function(name: str) -> pyceres.LossFunction | None:
 # the default".
 _DEFAULT_LOSS = object()
 
-
 def _add_virtual_track_residuals(
     problem: pyceres.Problem,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -95,7 +99,7 @@ def _add_virtual_track_residuals(
     loss_function: pyceres.LossFunction | None | object = _DEFAULT_LOSS,
 ) -> None:
     """
-    Add reprojection residuals for virtual tracks to an existing ceres problem.
+    Add reprojection residuals for virtual tracks to an existing ceres problem. (reconstruction used a rig)
 
     Pose and intrinsic parameter blocks are resolved through
     ``reference_reconstruction`` (the real reconstruction handed to
@@ -171,23 +175,38 @@ def _add_virtual_track_residuals(
 
             # Pose & intrinsics come from the reference reconstruction so the
             # underlying numpy buffers are shared with pycolmap's residuals.
-            cam_pose = reference_reconstruction.frames[
-                ref_id
-            ].rig_from_world.params
+            frame = reference_reconstruction.frames[
+                reference_reconstruction.images[ref_id].frame_id
+            ]
+            cam_pose = frame.rig_from_world.params
             camera_params = reference_reconstruction.cameras[camera_id].params
             active_model_id = reference_reconstruction.cameras[camera_id].model
+
+            # Fixed sensor_from_rig for this image's sensor, read from the
+            # reconstruction's rig (identity for the reference sensor).
+            sid = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id)
+            rig = reference_reconstruction.rigs[frame.rig_id]
+            sensor_from_rig = (
+                pycolmap.Rigid3d()
+                if rig.is_ref_sensor(sid)
+                else rig.sensor_from_rig(sid)
+            )
+            sfr_R = np.array(sensor_from_rig.rotation.matrix())
+            sfr_t = np.array(sensor_from_rig.translation)
 
             is_negative = (
                 image_id in negative_depth_observations
                 and pt_idx in negative_depth_observations[image_id]
             )
             if is_negative:
-                cost = pygluemap.ReprojErrorCostWithNegativeDepth(
-                    active_model_id, point2D
+                cost = pygluemap.RigReprojErrorCostWithNegativeDepth(
+                    active_model_id, point2D, sfr_R, sfr_t
                 )
                 num_negative += 1
             else:
-                cost = pygluemap.ReprojErrorCost(active_model_id, point2D)
+                cost = pygluemap.RigReprojErrorCost(
+                    active_model_id, point2D, sfr_R, sfr_t
+                )
 
             problem.add_residual_block(
                 cost,
@@ -255,6 +274,9 @@ def bundle_adjustment(
 
     # --- Build pycolmap BA over the real reconstruction --------------------
     ba_options = pycolmap.BundleAdjustmentOptions()
+    # Hard rig: freeze the fixed sensor_from_rig offsets (pycolmap defaults this
+    # to True). No-op for trivial rigs, whose sensors are all reference sensors.
+    ba_options.refine_sensor_from_rig = False
     # Restore stock Ceres convergence tolerances.
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations

@@ -269,6 +269,7 @@ def run_refinement_pipeline(
         add_tracks=add_tracks,
         add_virtual_points=False,
         database_name=database_name,
+        rig=getattr(args, "rig", None),
     )
     refinement_timing["prepare_prior"] = time.perf_counter() - t0
 
@@ -386,6 +387,7 @@ def run_refinement_pipeline(
         image_sizes=dataset_pair.images_shape_ori,
         images_list=dataset_pair.images_list,
         camera_model=dataset_pair.camera_model,
+        rig=getattr(args, "rig", None),
     )
     refinement_timing["build_reconstruction"] = time.perf_counter() - t0
 
