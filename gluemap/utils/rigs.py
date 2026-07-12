@@ -70,6 +70,43 @@ class BoundRig:
         rig = self.spec.rig_of_sensor(sensor)
         return rig.sensor_from_ref[rig.members.index(sensor)]
 
+    def camera_id_of(self, sensor: str) -> int:
+        """
+        1-indexed COLMAP camera_id for a sensor. Single source of truth so
+        the DB writer and the reconstruction builder cannot number cameras
+        differently. 
+
+        I think this is to keep track of the colmap Camera type. 
+        """
+        return self.spec.sensors.index(sensor) + 1
+
+    def rig_id_of(self, sensor: str) -> int:
+        """
+        1-indexed COLMAP rig_id for the rig that owns a sensor. Shared source
+        of truth so the DB writer and the builder agree on rig numbering.
+
+        In the single rig setting, this will be just 1. But if we used two image sets: 
+         
+        + rig
+        + dslr 
+
+        Then they'll get different ids.
+        """
+        rig_id = next(
+            (i + 1 for i, r in enumerate(self.spec.rigs) if sensor in r.members),
+            None,
+        )
+        assert rig_id is not None, f"(rig_id_of): unknown sensor {sensor}"
+        return rig_id
+
+    def frame_id_of(self, idx: int) -> int:
+        """
+        1-indexed COLMAP frame_id for an image's frame, which is the frame's
+        reference image id. Shared source of truth so the DB writer and the
+        builder group images into frames identically.
+        """
+        return self.ref_of[idx] + 1
+
 
 def fold_relative_poses(
     edges: dict[tuple[int, int], tuple[np.ndarray, float]],
@@ -99,6 +136,42 @@ def bind_rig_spec(spec: RigSpec, image_paths: list[str]) -> BoundRig:
         for idx in sensor_of
     }
     return BoundRig(spec, ref_of, sensor_of, frame_of)
+
+
+def compute_world_space_rig_offset(
+    rig: BoundRig,
+    global_rotations: dict[int, np.ndarray],
+    idx: int,
+) -> np.ndarray:
+    """World-space offset of image idx from its rig reference centre."""
+    r = rig.ref_of[idx]
+    M = rig.sensor_from_ref_of(idx)
+    return global_rotations[r].T @ (-M[:3, :3].T @ M[:3, 3])
+
+
+def add_member_centers(
+    reference_centers: dict[int, np.ndarray],
+    global_rotations: dict[int, np.ndarray],
+    rig: BoundRig,
+) -> dict[int, np.ndarray]:
+    """Place every image at its reference centre plus the known rig offset."""
+    global_centers = {}
+    for idx in global_rotations:
+        r = rig.ref_of[idx]
+        delta = compute_world_space_rig_offset(rig, global_rotations, idx)
+        global_centers[idx] = reference_centers[r] + delta
+    return global_centers
+
+
+def is_metric_edge(rig: BoundRig, idx1: int, idx2: int, eps: float = 1e-6) -> bool:
+    """True if idx1 and idx2 are the same rig-frame with a nonzero baseline."""
+    if rig.ref_of[idx1] != rig.ref_of[idx2]:
+        return False
+    M1 = rig.sensor_from_ref_of(idx1)
+    M2 = rig.sensor_from_ref_of(idx2)
+    c1 = -M1[:3, :3].T @ M1[:3, 3]
+    c2 = -M2[:3, :3].T @ M2[:3, 3]
+    return np.linalg.norm(c1 - c2) > eps
 
 
 def as_rigid_matrix(rows: list[list[float]]) -> np.ndarray:
