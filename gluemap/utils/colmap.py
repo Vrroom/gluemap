@@ -8,6 +8,7 @@ import torch
 from tqdm import tqdm
 
 from gluemap.estimators.track_establishment import TrackEstablishment
+from gluemap.utils.rigs import BoundRig
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,13 @@ def merge_colmap_databases(
                 )
                 db_output.write_camera(new_cam)
 
+    # Carry rigs from the primary DB so the merged DB's rig structure matches
+    # the reconstruction. Without this the merged DB has no rigs, COLMAP
+    # synthesizes trivial ones, and triangulate_points fails to reconcile.
+    # No-op when the primary has no rigs.
+    for primary_rig in db_primary.read_all_rigs():
+        db_output.write_rig(primary_rig, use_rig_id=True)
+
     # Step 2: Write images and track keypoint offsets
     name_to_output_image_id = {}
     primary_offsets = {}  # image_name -> index offset for primary keypoints
@@ -204,6 +212,16 @@ def merge_colmap_databases(
             new_img.camera_id = secondary_cam_to_output_cam[sec_img.camera_id]
             db_output.write_image(new_img, use_image_id=True)
             name_to_output_image_id[name] = sec_img.image_id
+
+    # Carry frames from the primary DB and stamp each image's frame_id, so the
+    # merged DB's rig/frame structure matches the reconstruction. No-op when
+    # the primary has no frames.
+    for primary_frame in db_primary.read_all_frames():
+        db_output.write_frame(primary_frame, use_frame_id=True)
+        for data in primary_frame.data_ids:
+            im = db_output.read_image(data.id)
+            im.frame_id = primary_frame.frame_id
+            db_output.update_image(im)
 
     # Step 3: Merge and write keypoints
     logger.info("Merging and writing keypoints...")
@@ -504,6 +522,7 @@ def prepare_glomap_prior(
     add_tracks: bool = True,
     add_virtual_points: bool = True,
     database_name: str = "database.db",
+    rig: BoundRig | None = None,
 ) -> None:
     """Build a COLMAP database to use as a glomap prior.
 
@@ -542,22 +561,59 @@ def prepare_glomap_prior(
         if camera_sizes[camera_id] is None:
             camera_sizes[camera_id] = images_shape_ori[i]
 
-    # Write cameras
-    cameras_colmap = {}
-    for i in range(len(global_intrinsics)):
-        if global_intrinsics[i] is None:
-            continue
+    # Write cameras. With a rig, each sensor is its own camera (per-sensor
+    # intrinsics, camera_id from BoundRig) and the real rigs are written so the
+    # DB's rig structure matches the reconstruction the builder produces.
+    # Without a rig, one camera per intrinsics group as before.
+    if rig is not None:
+        CAMERA = pycolmap.SensorType.CAMERA
+        sensor_repr = {}
+        for idx in range(len(images_shape_ori)):
+            if idx in intrinsics_mapping:
+                sensor_repr.setdefault(rig.sensor_of[idx], idx)
+        for sensor in rig.spec.sensors:
+            repr_idx = sensor_repr[sensor]
+            height, width = images_shape_ori[repr_idx]
+            camera = camera_from_intrinsics_matrix(
+                global_intrinsics[intrinsics_mapping[repr_idx]][0],
+                camera_model,
+                width,
+                height,
+                rig.camera_id_of(sensor),
+            )
+            database.write_camera(camera, use_camera_id=True)
+        for rig_index, spec_rig in enumerate(rig.spec.rigs):
+            pyrig = pycolmap.Rig()
+            pyrig.rig_id = rig_index + 1
+            pyrig.add_ref_sensor(
+                pycolmap.sensor_t(
+                    CAMERA, rig.camera_id_of(spec_rig.members[0])
+                )
+            )
+            for member, M in zip(
+                spec_rig.members[1:], spec_rig.sensor_from_ref[1:]
+            ):
+                pyrig.add_sensor(
+                    pycolmap.sensor_t(CAMERA, rig.camera_id_of(member)),
+                    pycolmap.Rigid3d(pycolmap.Rotation3d(M[:3, :3]), M[:3, 3]),
+                )
+            database.write_rig(pyrig, use_rig_id=True)
+    else:
+        cameras_colmap = {}
+        for i in range(len(global_intrinsics)):
+            if global_intrinsics[i] is None:
+                continue
 
-        camera = camera_from_intrinsics_matrix(
-            global_intrinsics[i][0],
-            camera_model,
-            camera_sizes[i][-1],
-            camera_sizes[i][0],
-            i + 1,
-        )
+            camera = camera_from_intrinsics_matrix(
+                global_intrinsics[i][0],
+                camera_model,
+                camera_sizes[i][-1],
+                camera_sizes[i][0],
+                i + 1,
+            )
 
-        database.write_camera(camera)
-        cameras_colmap[i] = camera
+            database.write_camera(camera)
+            cameras_colmap[i] = camera
 
     logger.info("Write cameras to database done")
 
@@ -581,7 +637,10 @@ def prepare_glomap_prior(
     logger.info("Add images to database...")
     for idx in tqdm(range(N)):
         image = pycolmap.Image()
-        image.camera_id = intrinsics_mapping[idx] + 1
+        if rig is not None:
+            image.camera_id = rig.camera_id_of(rig.sensor_of[idx])
+        else:
+            image.camera_id = intrinsics_mapping[idx] + 1
 
         if images_list is not None:
             image.name = images_list[idx]
@@ -590,6 +649,29 @@ def prepare_glomap_prior(
         image.image_id = idx + 1
 
         database.write_image(image, use_image_id=True)
+
+    # With a rig, write a Frame per capture instant (grouping the sensors that
+    # fired together) and stamp each image's frame_id, so the DB's rig/frame
+    # structure matches the reconstruction the builder produces.
+    if rig is not None:
+        members_by_frame = {}
+        for idx in range(N):
+            members_by_frame.setdefault(rig.ref_of[idx], []).append(idx)
+        for ref_idx, member_idxs in members_by_frame.items():
+            frame = pycolmap.Frame()
+            frame.frame_id = rig.frame_id_of(ref_idx)
+            frame.rig_id = rig.rig_id_of(rig.sensor_of[ref_idx])
+            for idx in member_idxs:
+                sid = pycolmap.sensor_t(
+                    pycolmap.SensorType.CAMERA,
+                    rig.camera_id_of(rig.sensor_of[idx]),
+                )
+                frame.add_data_id(pycolmap.data_t(sid, idx + 1))
+            database.write_frame(frame, use_frame_id=True)
+            for idx in member_idxs:
+                im = database.read_image(idx + 1)
+                im.frame_id = frame.frame_id
+                database.update_image(im)
 
     # Write keypoints to database
     for idx, keypoints in keypoints_per_image.items():
