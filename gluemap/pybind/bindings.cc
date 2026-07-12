@@ -101,6 +101,22 @@ PYBIND11_MODULE(pygluemap, m) {
         &PairwiseDirectionError::Create<const Eigen::Vector3d &>,
         py::arg("translation_obs"));
 
+  m.def("PairwiseDirectionErrorWithOffset",
+        &PairwiseDirectionErrorWithOffset::Create<const Eigen::Vector3d &,
+                                                  const Eigen::Vector3d &>,
+        py::arg("translation_obs"), py::arg("offset"));
+
+  m.def("ScaleOnlyDirectionError",
+        &ScaleOnlyDirectionError::Create<const Eigen::Vector3d &,
+                                         const Eigen::Vector3d &>,
+        py::arg("translation_obs"), py::arg("offset"));
+
+  m.def("RelativePosePriorError",
+        &RelativePosePriorError::Create<const Eigen::Matrix3d &,
+                                        const Eigen::Vector3d &, double, double>,
+        py::arg("b_R_a"), py::arg("b_t_a"), py::arg("w_rot"),
+        py::arg("w_trans"));
+
   m.def("ReprojErrorCost",
         &colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor,
                                           const Eigen::Vector2d &>,
@@ -112,6 +128,25 @@ PYBIND11_MODULE(pygluemap, m) {
                                         const Eigen::Vector2d &>,
       "camera_model_id"_a, "point2D"_a,
       "Reprojection error with negative depth.");
+
+  m.def(
+      "RigReprojErrorCostWithNegativeDepth",
+      &colmap::CreateCameraCostFunction<
+          RigReprojErrorCostWithNegativeDepthFunctor, const Eigen::Vector2d &,
+          const Eigen::Matrix3d &, const Eigen::Vector3d &>,
+      "camera_model_id"_a, "point2D"_a, "sensor_from_rig_R"_a,
+      "sensor_from_rig_t"_a,
+      "Rig-aware reprojection error (sensor_from_rig o rig_from_world) with "
+      "negative depth.");
+
+  m.def(
+      "RigReprojErrorCost",
+      &colmap::CreateCameraCostFunction<
+          RigReprojErrorCostFunctor, const Eigen::Vector2d &,
+          const Eigen::Matrix3d &, const Eigen::Vector3d &>,
+      "camera_model_id"_a, "point2D"_a, "sensor_from_rig_R"_a,
+      "sensor_from_rig_t"_a,
+      "Rig-aware reprojection error (sensor_from_rig o rig_from_world).");
 
   // Manifold creation helpers for 7D pose (quaternion + translation)
   m.def("CreatePoseManifold", &CreatePoseManifold,
