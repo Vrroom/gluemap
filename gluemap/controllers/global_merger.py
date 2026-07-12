@@ -323,8 +323,6 @@ class GlobalGluer:
         self._prune_invisible_pairs(predictions_dict)
 
         # Initialize the structures by maximum spanning tree
-        import pdb
-        pdb.set_trace()
         if self.rig is None:
             global_centers, global_scales = initialize_mst_structures(
                 predictions_dict, global_rotations

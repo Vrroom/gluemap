@@ -5,7 +5,12 @@ import pyceres
 import pygluemap
 import torch
 
-from gluemap.utils.rigs import BoundRig
+from gluemap.utils.rigs import (
+    BoundRig,
+    add_member_centers,
+    compute_world_space_rig_offset,
+    is_metric_edge,
+)
 
 logger = logging.getLogger(__name__)
 # Minimum angle (in degrees) for a triangle to be considered valid for
@@ -61,6 +66,47 @@ def _initialize_parameters(
         global_scales = temp_scales
 
     return num_ministar, global_centers, global_scales
+
+
+def _initialize_parameters_with_rig(
+    predictions_dict: dict,
+    global_rotations: dict[int, np.ndarray],
+    global_centers: dict[int, np.ndarray] | None,
+    global_scales: list[np.ndarray] | dict[int, float] | None,
+    rig: BoundRig,
+) -> tuple[int, dict[int, np.ndarray], list[np.ndarray]]:
+    """Allocate per-reference centers and per-ministar scales."""
+    num_ministar = len(predictions_dict["indexes"])
+    references = sorted({rig.ref_of[idx] for idx in global_rotations})
+    if global_centers is None:
+        reference_centers = {
+            r: np.random.rand(3).astype(np.float64) for r in references
+        }
+    else:
+        reference_centers = {}
+        for r in references:
+            if r in global_centers:
+                reference_centers[r] = np.asarray(
+                    global_centers[r], dtype=np.float64
+                )
+            else:
+                reference_centers[r] = np.random.rand(3).astype(np.float64)
+    if global_scales is None:
+        global_scales = [
+            np.ones((1,)).astype(np.float64) for i in range(num_ministar)
+        ]
+    elif isinstance(global_scales, dict):
+        temp_scales = []
+        for idx_star in range(num_ministar):
+            if idx_star in global_scales:
+                temp_scales.append(
+                    np.ones((1,)).astype(np.float64) * global_scales[idx_star]
+                )
+            else:
+                temp_scales.append(np.ones((1,)).astype(np.float64))
+        global_scales = temp_scales
+
+    return num_ministar, reference_centers, global_scales
 
 
 def _add_star_edge_error(
@@ -149,6 +195,135 @@ def _add_star_edge_error(
 
     return center
 
+def _add_star_edge_error_with_rig(
+    prob: pyceres.Problem,
+    predictions_dict: dict,
+    global_rotations: dict[int, np.ndarray],
+    global_centers: dict[int, np.ndarray],
+    global_scales: list[np.ndarray],
+    num_ministar: int,
+    costs: list,
+    losses: list,
+    rig: BoundRig,
+    metric_stars: set,
+) -> int:
+    """
+    Add pairwise direction residuals for every valid star edge with rig.
+
+    For each ministar's center image and its neighbours, attaches a
+    ``PairwiseDirectionError`` cost block linking the two camera centers
+    and the ministar scale. Edges with score <= 0 or median triangulation
+    angle below :data:`MIN_TRI_ANGLE` are skipped. Pins the first chosen
+    center and its ministar's scale to remove the gauge.
+
+    Args:
+        prob: Ceres problem to append residuals to.
+        predictions_dict: Star inference output with ``"indexes"``,
+            ``"pose_scores"``, ``"median_tri_angle"`` and ``"extrinsics"``.
+        global_rotations: Per-image rotation matrices.
+        global_centers: Per-reference camera centers (parameter blocks).
+        global_scales: Per-ministar scale parameter blocks.
+        num_ministar: Number of ministars to iterate over.
+        costs: Output list to which created cost objects are appended (kept
+            alive by the caller).
+        losses: Output list of created loss functions (kept alive too).
+        rig: Holds the known relationships
+        metric_stars: Output set; ministar indices given a scale-only
+            (calibration) edge are added here.
+
+    Returns:
+        The image id whose center was fixed for gauge, or ``-1`` if no edge
+        was added.
+    """
+    center = -1
+    first_scale_star = None
+    for idx_star in range(num_ministar):
+        scores = predictions_dict["pose_scores"][idx_star][0]
+        idx1 = predictions_dict["indexes"][idx_star][0]
+        valid_j = torch.where(scores > 0.0)[0].tolist()
+
+        # Now, only consider the scale of the center image
+        for idx in valid_j:
+            idx2 = predictions_dict["indexes"][idx_star][idx]
+
+            if idx1 == idx2:
+                continue
+
+            is_intra = rig.ref_of[idx1] == rig.ref_of[idx2]
+            metric = is_metric_edge(rig, idx1, idx2)  # metric => intra
+
+            # intra-rig with a shared optical centre carries no scale info
+            if is_intra and not metric:
+                continue
+
+            # inter-rig edges obey the tri-angle gate; metric edges bypass it
+            # (their scale comes from calibration, not triangulation)
+            if not is_intra and (
+                predictions_dict["median_tri_angle"][idx_star][idx - 1].item()
+                < MIN_TRI_ANGLE
+            ):
+                continue
+
+            # Let r1 be the ref of i & let r2 be the ref of j
+            # delta_i = world space offset of i wrt i1, same for j
+            # Substitute: c_i = c_r1 + delta_i, same for j: 
+            #    s_i * (c_j - c_i) = -R_j^T * t_ij
+            # => s_i * (c_r2 - c_r1 + (delta_j - delta_i)) = ...
+            t_ij_rotated = (
+                -global_rotations[idx2].T
+                @ predictions_dict["extrinsics"][idx_star][0, idx, :3, 3:]
+                .cpu()
+                .numpy()
+            )
+            # computing (delta_j - delta_i)
+            offset = (
+                compute_world_space_rig_offset(rig, global_rotations, idx2)
+                - compute_world_space_rig_offset(rig, global_rotations, idx1)
+            )
+            loss_scaled = pyceres.LossFunction(
+                {"name": "huber", "params": [1e-2], "magnitude": scores[idx]}
+            )
+
+            if metric: # by default also intra
+                # centers cancel; only the scale is optimized
+                cost = pygluemap.ScaleOnlyDirectionError(t_ij_rotated, offset)
+                prob.add_residual_block(
+                    cost,
+                    loss_scaled,
+                    [global_scales[idx_star]],
+                )
+                metric_stars.add(idx_star)
+            else: # since not metric, intra can't be true here, because of continue above.
+                # centers also optimized
+                cost = pygluemap.PairwiseDirectionErrorWithOffset(
+                    t_ij_rotated, offset
+                )
+                prob.add_residual_block(
+                    cost,
+                    loss_scaled,
+                    [
+                        global_centers[rig.ref_of[idx1]],
+                        global_centers[rig.ref_of[idx2]],
+                        global_scales[idx_star],
+                    ],
+                )
+
+            costs.append(cost)
+            losses.append(loss_scaled)
+
+            if center < 0 and not is_intra:
+                prob.set_parameter_block_constant(
+                    global_centers[rig.ref_of[idx1]]
+                )
+                center = idx1
+            if first_scale_star is None:
+                first_scale_star = idx_star
+
+    # scale gauge: pin one scale only when no metric edge fixes it
+    if not metric_stars and first_scale_star is not None:
+        prob.set_parameter_block_constant(global_scales[first_scale_star])
+
+    return center
 
 def _update_points3d(
     prob: pyceres.Problem,
@@ -255,35 +430,61 @@ def similarity_averaging(
         The updated ``global_centers`` mapping (also written in place).
     """
     logger.info("Performing similarity averaging...")
-    num_ministar, global_centers, global_scales = _initialize_parameters(
-        predictions_dict,
-        global_rotations,
-        global_centers,
-        global_scales,
-    )
+    if rig is None:
+        num_ministar, global_centers, global_scales = _initialize_parameters(
+            predictions_dict,
+            global_rotations,
+            global_centers,
+            global_scales,
+        )
+    else:
+        num_ministar, global_centers, global_scales = (
+            _initialize_parameters_with_rig(
+                predictions_dict,
+                global_rotations,
+                global_centers,
+                global_scales,
+                rig,
+            )
+        )
 
     prob = pyceres.Problem()
 
     costs = []
     losses = []
+    metric_stars = set()
 
-    _add_star_edge_error(
-        prob,
-        predictions_dict,
-        global_rotations,
-        global_centers,
-        global_scales,
-        num_ministar,
-        costs,
-        losses,
-    )
+    if rig is None :
+        _add_star_edge_error(
+            prob,
+            predictions_dict,
+            global_rotations,
+            global_centers,
+            global_scales,
+            num_ministar,
+            costs,
+            losses,
+        )
+    else : 
+        _add_star_edge_error_with_rig(
+            prob,
+            predictions_dict,
+            global_rotations,
+            global_centers,
+            global_scales,
+            num_ministar,
+            costs,
+            losses,
+            rig,
+            metric_stars,
+        )
 
     for idx_star in range(num_ministar):
         if not prob.has_parameter_block(global_scales[idx_star]):
             continue
-        if (
-            fix_scales
-            or predictions_dict["median_tri_angle"][idx_star].max().item()
+        if fix_scales or (
+            idx_star not in metric_stars
+            and predictions_dict["median_tri_angle"][idx_star].max().item()
             < MIN_TRI_ANGLE
         ):
             prob.set_parameter_block_constant(global_scales[idx_star])
@@ -302,6 +503,11 @@ def similarity_averaging(
     pyceres.solve(options, prob, summary)
 
     logger.info(summary.BriefReport())
+
+    if rig is not None:
+        global_centers = add_member_centers(
+            global_centers, global_rotations, rig
+        )
 
     _update_points3d(
         prob,

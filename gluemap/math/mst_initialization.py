@@ -6,13 +6,16 @@ maximises the per-edge confidence, and walks the tree to seed each image's
 global centre and scale before similarity averaging refines them.
 """
 
-import pickle
-
 import networkx as nx
 import numpy as np
 import torch
 
-from gluemap.utils.rigs import BoundRig, fold_graph
+from gluemap.utils.rigs import (
+    BoundRig,
+    add_member_centers,
+    compute_world_space_rig_offset,
+    fold_graph,
+)
 
 # Minimum median triangulation angle (degrees) for an edge's relative scale
 # to be considered reliable; below this we fall back to a unit scale ratio.
@@ -197,9 +200,6 @@ def initialize_mst_structures(
 
         stack.append((neighbor, iter(mst.neighbors(neighbor))))
 
-    with open("centers.pkl", "wb") as fh:
-        pickle.dump(global_centers, fh)
-
     return global_centers, global_scales
 
 
@@ -279,27 +279,6 @@ def seed_star_scales(
     return global_scales
 
 
-def add_member_centers(
-    reference_centers: dict[int, np.ndarray],
-    global_rotations: dict[int, np.ndarray],
-    rig: BoundRig,
-) -> dict[int, np.ndarray]:
-    """Place every image at its reference centre plus the known rig offset."""
-    global_centers = {}
-    for idx in global_rotations:
-        r = rig.ref_of[idx]
-        M = rig.sensor_from_ref_of(idx)
-        R = global_rotations[r]
-
-        rc = reference_centers[r]
-
-        m_in_ref = -M[:3, :3].T @ M[:3, 3]
-        delta_in_w = R.T @ m_in_ref
-
-        global_centers[idx] = rc + delta_in_w
-    return global_centers
-
-
 def walk_reference_centers(
     rel_poses: dict,
     global_rotations: dict[int, np.ndarray],
@@ -373,10 +352,8 @@ def walk_reference_centers(
         t_hat = -global_rotations[j].T @ pose[:3, 3].numpy()
         s = global_scales[star]
 
-        Mi = rig.sensor_from_ref_of(i)
-        Mj = rig.sensor_from_ref_of(j)
-        delta_i = global_rotations[node].T @ (-Mi[:3, :3].T @ Mi[:3, 3])
-        delta_j = global_rotations[neighbor].T @ (-Mj[:3, :3].T @ Mj[:3, 3])
+        delta_i = compute_world_space_rig_offset(rig, global_rotations, i)
+        delta_j = compute_world_space_rig_offset(rig, global_rotations, j)
 
         global_centers[neighbor] = (
             global_centers[node] + t_hat / s + delta_i - delta_j
@@ -489,16 +466,11 @@ def initialize_mst_structures_with_rig(
     for i, j in invalid_edges:
         del rel_poses[(i, j)]
 
-    import pdb
-    pdb.set_trace()
     anchor = find_metric_anchor(rel_poses, rig)
     global_scales = seed_star_scales(
         rel_poses, scales, node_idx_to_star_idx, anchor
     )
     reference_centers = walk_reference_centers(rel_poses, global_rotations, global_scales, rig) 
     global_centers = add_member_centers(reference_centers, global_rotations, rig)
-
-    with open("centers_with_rig.pkl", "wb") as fh:
-        pickle.dump(global_centers, fh)
 
     return global_centers, global_scales
