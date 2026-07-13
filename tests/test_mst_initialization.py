@@ -2,10 +2,14 @@
 
 import logging
 
+import networkx as nx
 import numpy as np
 import torch
 
-from gluemap.math.mst_initialization import initialize_mst_structures
+from gluemap.math.mst_initialization import (
+    initialize_mst_structures,
+    walk_tree,
+)
 from tests.helpers import (
     build_predictions_dict,
     build_star_topology_full,
@@ -239,3 +243,59 @@ class TestMSTInitializationDisconnected:
                 f"Image {img_id} (cluster B) should not be reachable "
                 f"from node 0"
             )
+
+
+class TestWalkTree:
+    """Tests for the shared tree-traversal primitive."""
+
+    def test_single_node_no_visits(self):
+        T = nx.Graph()
+        T.add_node(0)
+        calls = []
+        walk_tree(T, 0, lambda p, c: calls.append((p, c)))
+        assert calls == []
+
+    def test_chain_visits_in_path_order(self):
+        T = nx.path_graph(4)
+        calls = []
+        walk_tree(T, 0, lambda p, c: calls.append((p, c)))
+        assert calls == [(0, 1), (1, 2), (2, 3)]
+
+    def test_each_edge_once_parents_first(self):
+        T = nx.Graph([(0, 1), (0, 2), (1, 3), (1, 4), (2, 5), (5, 6)])
+        calls = []
+        walk_tree(T, 0, lambda p, c: calls.append((p, c)))
+        assert len(calls) == T.number_of_edges()
+        assert {frozenset(e) for e in calls} == {frozenset(e) for e in T.edges}
+        seen = {0}
+        for p, c in calls:
+            assert p in seen, f"child {c} visited before its parent {p}"
+            assert c not in seen, f"node {c} visited twice"
+            seen.add(c)
+
+    def test_multiplicative_propagation_matches_path_product(self):
+        """The seed_star_scales pattern: chain per-edge ratios from the root."""
+        T = nx.Graph([(0, 1), (1, 2), (1, 3), (0, 4)])
+        ratio = {(0, 1): 2.0, (1, 2): 0.5, (1, 3): 3.0, (0, 4): 4.0}
+        ratio.update({(c, p): 1.0 / r for (p, c), r in list(ratio.items())})
+        values = {0: 10.0}
+
+        def visit(parent, child):
+            values[child] = values[parent] * ratio[(parent, child)]
+
+        walk_tree(T, 0, visit)
+        assert values == {0: 10.0, 1: 20.0, 2: 10.0, 3: 60.0, 4: 40.0}
+
+    def test_forest_walks_only_roots_component(self):
+        """On a forest, only the root's tree is visited (per-component use)."""
+        T = nx.Graph([(0, 1), (1, 2), (10, 11)])
+        calls = []
+        walk_tree(T, 0, lambda p, c: calls.append((p, c)))
+        assert {c for _, c in calls} == {1, 2}
+
+    def test_deep_chain_no_recursion_error(self):
+        n = 5000  # far beyond the default recursion limit
+        T = nx.path_graph(n)
+        children = []
+        walk_tree(T, 0, lambda p, c: children.append(c))
+        assert len(children) == n - 1
