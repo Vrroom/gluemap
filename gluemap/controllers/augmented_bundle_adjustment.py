@@ -401,6 +401,9 @@ class IterativeBAOptions:
     # Whether to filter virtual points same as real tracks
     filter_virtual_points: bool = True
 
+    # Camera ids whose intrinsics are known exactly and must stay constant
+    known_camera_ids: set[int] | None = None
+
 
 def prune_track_outliers(
     points3D: dict[int, pycolmap.Point3D],
@@ -707,6 +710,7 @@ def iterative_bundle_adjustment(
             virtual_reconstruction,
             negative_depth_observations,
             max_num_iterations=options.max_ba_iterations,
+            known_camera_ids=options.known_camera_ids,
         )
 
         # Inner loop: filter and tighten threshold when too few tracks filtered

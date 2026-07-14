@@ -340,13 +340,22 @@ def run_refinement_pipeline(
 
     # Step 3: Initialize 3D world points
     t0 = time.perf_counter()
+    camera_sizes = [None] * len(global_intrinsics)
+    for img_id, cam_id in dataset_pair.intrinsics_mapping.items():
+        if camera_sizes[cam_id] is None:
+            camera_sizes[cam_id] = dataset_pair.images_shape_ori[img_id]
     cameras = [
         (
-            camera_from_intrinsics_matrix(intr[0], dataset_pair.camera_model)
+            camera_from_intrinsics_matrix(
+                intr[0],
+                dataset_pair.camera_model,
+                camera_sizes[i][1],
+                camera_sizes[i][0],
+            )
             if intr is not None
             else None
         )
-        for intr in global_intrinsics
+        for i, intr in enumerate(global_intrinsics)
     ]
     negative_depth_observations = build_negative_depth_observations(
         pts2d_idx_inv, images_points2d_virtual_isnegative
@@ -373,6 +382,7 @@ def run_refinement_pipeline(
         normalized_reproj_threshold=1e-2,
         min_track_length=2,
         fix_rotations_first_pass=False,
+        known_camera_ids=getattr(args, "known_camera_ids", None),
     )
 
     # Step 5: Build reconstruction from current data

@@ -229,6 +229,7 @@ def bundle_adjustment(
     max_num_iterations: int = 200,
     loss_type_normal: str = "huber",
     loss_type_virtual: str = "arctan",
+    known_camera_ids: set[int] | None = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -289,6 +290,15 @@ def bundle_adjustment(
     for point3D_id in reconstruction.points3D:
         ba_config.add_variable_point(point3D_id)
     ba_config.fix_gauge(pycolmap.BundleAdjustmentGauge.TWO_CAMS_FROM_WORLD)
+    # This only freezes cameras with at least one real observation. A known
+    # camera observed solely by virtual tracks enters the problem as a fresh,
+    # variable block and can still drift; accepted as too rare to handle.
+    for camera_id in sorted(known_camera_ids or ()):
+        assert camera_id in reconstruction.cameras, (
+            f"(bundle_adjustment): known camera id {camera_id} not in "
+            f"reconstruction, have {sorted(reconstruction.cameras)}"
+        )
+        ba_config.set_constant_cam_intrinsics(camera_id)
 
     bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(
         ba_options, ba_config, reconstruction

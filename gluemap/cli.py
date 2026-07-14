@@ -2,7 +2,10 @@ import logging
 import os
 import re
 
-from gluemap.controllers.gluemap_impl import run_inference_pipeline
+from gluemap.controllers.gluemap_impl import (
+    bind_rig_from_args,
+    run_inference_pipeline,
+)
 from gluemap.controllers.image_retrieval import (
     run_preprocessing_pipeline,
     run_preprocessing_pipeline_multi,
@@ -24,6 +27,7 @@ def demo_main():
 
     args.curr_processed = args.write_path
     args.curr_path = args.write_path
+    bind_rig_from_args(args)
 
     if args.is_multi_sequence:
         # Multi-sequence inputs are sequential within each sequence.

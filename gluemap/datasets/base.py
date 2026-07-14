@@ -190,8 +190,21 @@ class DemoBaseDataset:
 
         self.intrinsics_mapping = {}
         mode = getattr(args, "intrinsics_mode", "SHARED")
+        rig = getattr(args, "rig", None)
 
-        if mode == "SHARED":
+        if rig is not None:
+            sensors = rig.spec.sensors
+            for i in range(len(self.images_list)):
+                path = os.path.normpath(
+                    os.path.join(args.images_path, self.images_list[i])
+                )
+                spec_path = rig.spec.images[rig.sensor_of[i]][rig.frame_of[i]]
+                assert path == os.path.normpath(spec_path), (
+                    f"(_preload_images): image {i} resolves to {path}, "
+                    f"but the rig binding expects {spec_path}"
+                )
+                self.intrinsics_mapping[i] = sensors.index(rig.sensor_of[i])
+        elif mode == "SHARED":
             shape_to_intrinsics_idx = {}
             intrinsics_idx = 0
             for i, shape in enumerate(self.images_shape_ori):

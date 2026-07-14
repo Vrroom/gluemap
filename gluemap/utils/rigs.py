@@ -1,9 +1,21 @@
 import os
 from dataclasses import dataclass
 
+import imagesize
 import networkx as nx
 import numpy as np
+import torch
 import yaml
+
+
+@dataclass(frozen=True)
+class SensorIntrinsics:
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    width: int
+    height: int
 
 
 @dataclass(frozen=True)
@@ -11,6 +23,7 @@ class Rig:
     name: str
     members: list[str]
     sensor_from_ref: list[np.ndarray]
+    intrinsics: list[SensorIntrinsics] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,13 @@ class BoundRig:
         """
         return self.spec.sensors.index(sensor) + 1
 
+    def intrinsics_of(self, sensor: str) -> SensorIntrinsics | None:
+        """Declared intrinsics for a sensor, or None when its rig declares none."""
+        rig = self.spec.rig_of_sensor(sensor)
+        if rig.intrinsics is None:
+            return None
+        return rig.intrinsics[rig.members.index(sensor)]
+
     def rig_id_of(self, sensor: str) -> int:
         """
         1-indexed COLMAP rig_id for the rig that owns a sensor. Shared source
@@ -106,6 +126,33 @@ class BoundRig:
         builder group images into frames identically.
         """
         return self.ref_of[idx] + 1
+
+
+def inject_rig_intrinsics(
+    global_intrinsics: list,
+    rig: BoundRig,
+    camera_model: str,
+) -> set[int]:
+    """Overwrite declared sensors' buckets in place; returns their COLMAP camera ids."""
+    sensors = rig.spec.sensors
+    assert len(global_intrinsics) == len(sensors), (
+        f"(inject_rig_intrinsics): {len(global_intrinsics)} buckets, {len(sensors)} sensors"
+    )
+    known_camera_ids = set()
+    for bucket, sensor in enumerate(sensors):
+        K = rig.intrinsics_of(sensor)
+        if K is None:
+            continue
+        assert not camera_model.startswith("SIMPLE") or K.fx == K.fy, (
+            f"(inject_rig_intrinsics): {sensor} declares fx={K.fx} fy={K.fy}, "
+            f"but camera model {camera_model} forces fx == fy"
+        )
+        global_intrinsics[bucket] = torch.tensor(
+            [[K.fx, 0.0, K.cx], [0.0, K.fy, K.cy], [0.0, 0.0, 1.0]],
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        known_camera_ids.add(rig.camera_id_of(sensor))
+    return known_camera_ids
 
 
 def fold_relative_poses(
@@ -190,6 +237,28 @@ def as_rigid_matrix(rows: list[list[float]]) -> np.ndarray:
     return M
 
 
+def as_sensor_intrinsics(raw: dict) -> SensorIntrinsics:
+    expected = {"fx", "fy", "cx", "cy", "width", "height"}
+    assert set(raw) == expected, (
+        f"(as_sensor_intrinsics): keys {sorted(raw)} != {sorted(expected)}"
+    )
+    fx, fy, cx, cy = (float(raw[k]) for k in ("fx", "fy", "cx", "cy"))
+    width, height = raw["width"], raw["height"]
+    assert isinstance(width, int) and width > 0, (
+        f"(as_sensor_intrinsics): width must be a positive int, got {width!r}"
+    )
+    assert isinstance(height, int) and height > 0, (
+        f"(as_sensor_intrinsics): height must be a positive int, got {height!r}"
+    )
+    assert fx > 0 and fy > 0, (
+        f"(as_sensor_intrinsics): focal lengths must be positive, got {fx}, {fy}"
+    )
+    assert 0 < cx < width and 0 < cy < height, (
+        f"(as_sensor_intrinsics): principal point ({cx}, {cy}) lies outside {width}x{height}"
+    )
+    return SensorIntrinsics(fx, fy, cx, cy, width, height)
+
+
 def load_rig_spec(path: str) -> RigSpec:
     with open(path) as fh:
         raw = yaml.safe_load(fh)
@@ -206,7 +275,7 @@ def load_rig_spec(path: str) -> RigSpec:
     )
     rigs = []
     for i, entry in enumerate(raw["rigs"]):
-        assert {"members", "sensor_from_ref"} <= set(entry) <= {"name", "members", "sensor_from_ref"}, (
+        assert {"members", "sensor_from_ref"} <= set(entry) <= {"name", "members", "sensor_from_ref", "intrinsics"}, (
             f"(load_rig_spec): rig {i} has bad keys {sorted(entry)}"
         )
         members = entry["members"]
@@ -217,7 +286,13 @@ def load_rig_spec(path: str) -> RigSpec:
         assert np.allclose(mats[0], np.eye(4)), (
             f"(load_rig_spec): rig {i} reference matrix must be identity, got\n{mats[0]}"
         )
-        rigs.append(Rig(entry.get("name", f"rig_{i}"), members, mats))
+        intrinsics = None
+        if "intrinsics" in entry:
+            intrinsics = [as_sensor_intrinsics(k) for k in entry["intrinsics"]]
+            assert len(intrinsics) == len(members), (
+                f"(load_rig_spec): rig {i} has {len(members)} members but {len(intrinsics)} intrinsics"
+            )
+        rigs.append(Rig(entry.get("name", f"rig_{i}"), members, mats, intrinsics))
     claimed = [m for rig in rigs for m in rig.members]
     assert sorted(claimed) == sorted(sensors), (
         f"(load_rig_spec): rigs must partition sensors exactly, {sorted(claimed)} != {sorted(sensors)}"
@@ -255,6 +330,15 @@ def load_rig_spec(path: str) -> RigSpec:
         for p in paths:
             assert isinstance(p, str), f"(load_rig_spec): sensor {s} has non-string image entry {p!r}"
             assert os.path.isfile(p), f"(load_rig_spec): missing image file {p}"
+        rig = rigs[rig_of[s]]
+        if rig.intrinsics is not None:
+            K = rig.intrinsics[rig.members.index(s)]
+            for p in paths:
+                w, h = imagesize.get(p)
+                assert (w, h) == (K.width, K.height), (
+                    f"(load_rig_spec): sensor {s} declares {K.width}x{K.height}, "
+                    f"but {p} is {w}x{h}"
+                )
         all_paths += paths
     assert len(set(all_paths)) == len(all_paths), (
         "(load_rig_spec): duplicate image paths across sensors"

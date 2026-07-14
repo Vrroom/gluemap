@@ -1,5 +1,4 @@
 import logging
-import pickle
 
 import networkx as nx
 import numpy as np
@@ -466,9 +465,5 @@ def rotation_averaging_pycolmap_with_rig(
             rotations[idx] = Ms[idx][:3, :3] @ ref_rotations[r]
         else:
             rotations[idx] = np.eye(3, dtype=np.float64)
-
-    with open("rotations_with_rig.pkl", "wb") as fh:
-        pickle.dump(rotations, fh)
-    logger.info("Dumped rotations to rotations_with_rig.pkl")
 
     return rotations

@@ -29,7 +29,11 @@ from gluemap.utils.colmap import (
     prepare_sift_database,
     write_to_colmap_format,
 )
-from gluemap.utils.rigs import bind_rig_spec, load_rig_spec
+from gluemap.utils.rigs import (
+    bind_rig_spec,
+    inject_rig_intrinsics,
+    load_rig_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +265,17 @@ class GluemapPipeline:
                 f"Replaced intrinsics with GT from {args.gt_intrinsics_path}"
             )
 
+        rig = getattr(args, "rig", None)
+        args.known_camera_ids = set()
+        if rig is not None:
+            args.known_camera_ids = inject_rig_intrinsics(
+                global_intrinsics, rig, dataset_pair.camera_model
+            )
+            logger.info(
+                f"Injected schema intrinsics, camera ids "
+                f"{sorted(args.known_camera_ids)}"
+            )
+
         virtual_track_preparation = VirtualTrackPreparation()
         virtual_track_preparation.main(
             predictions_dict,
@@ -389,6 +404,17 @@ class GluemapPipeline:
 # Backward-compatible module-level wrapper functions
 
 
+def bind_rig_from_args(args: argparse.Namespace) -> None:
+    if hasattr(args, "rig"):
+        return
+    rig_config_path = getattr(args, "rig_config_path", None)
+    if rig_config_path is not None:
+        spec = load_rig_spec(rig_config_path)
+        args.rig = bind_rig_spec(spec, get_image_list(args.images_path))
+    else:
+        args.rig = None
+
+
 def run_inference_pipeline(
     args: argparse.Namespace,
     dataset_pair: BaseTwoViewDataset,
@@ -400,12 +426,7 @@ def run_inference_pipeline(
     models: dict[str, torch.nn.Module] | None = None,
 ) -> tuple[str | None, dict]:
     """Backward-compatible wrapper for GluemapPipeline.run()."""
-    rig_config_path = getattr(args, "rig_config_path", None)
-    if rig_config_path is not None:
-        spec = load_rig_spec(rig_config_path)
-        args.rig = bind_rig_spec(spec, get_image_list(args.images_path))
-    else:
-        args.rig = None
+    bind_rig_from_args(args)
     pipeline = GluemapPipeline(
         args, world_size, rank, device, dtype, models=models
     )

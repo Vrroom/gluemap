@@ -437,3 +437,32 @@ class TestBundleAdjustmentEndToEnd:
         # looser thresholds than the multi-view tests above.
         assert max_rot < 2.0, f"Max rotation error {max_rot:.4f} deg >= 2.0 deg"
         assert max_center < 0.1, f"Max center error {max_center:.6f} >= 0.1"
+
+
+def test_known_camera_ids_freeze_intrinsics():
+    rec = create_synthetic_reconstruction(
+        num_frames=6, num_points3D=60, num_rigs=2, seed=7
+    )
+    rng = np.random.default_rng(7)
+    perturb_points3D(rec, fraction=1.0, noise_std=0.05, rng=rng)
+    frozen_id, free_id = sorted(rec.cameras)[:2]
+    before_frozen = np.array(rec.cameras[frozen_id].params)
+    before_free = np.array(rec.cameras[free_id].params)
+
+    rec, _, summary = bundle_adjustment(
+        rec,
+        virtual_reconstruction=None,
+        negative_depth_observations={},
+        max_num_iterations=30,
+        known_camera_ids={frozen_id},
+    )
+
+    assert summary.final_cost < summary.initial_cost
+    after_frozen = np.array(rec.cameras[frozen_id].params)
+    after_free = np.array(rec.cameras[free_id].params)
+    assert np.array_equal(after_frozen, before_frozen), (
+        f"frozen camera {frozen_id} moved: {before_frozen} -> {after_frozen}"
+    )
+    assert not np.array_equal(after_free, before_free), (
+        f"free camera {free_id} did not move; test is not exercising refinement"
+    )
