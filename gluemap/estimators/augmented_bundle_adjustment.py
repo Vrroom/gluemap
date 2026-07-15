@@ -5,6 +5,8 @@ import pyceres
 import pycolmap
 import pygluemap
 
+from gluemap.utils.rigs import BoundRig
+
 logger = logging.getLogger(__name__)
 
 
@@ -222,6 +224,113 @@ def _add_virtual_track_residuals(
     )
 
 
+def _add_rig_prior_residuals(
+    problem: pyceres.Problem,
+    reconstruction: pycolmap.Reconstruction,
+    rig: BoundRig,
+) -> None:
+    """
+    A soft prior says: sensor a (in one rig) and sensor b (in a different
+    rig) are mounted on the same physical object, and calibration measured
+    their relative pose as b_from_a = N, trusted up to weights (w_rot,
+    w_trans). The rigs stay separate in this reconstruction, so at every
+    capture instant each has its own free frame pose (rig_from_world), and
+    without this function nothing ties them together.
+
+    This function adds, per instant, one residual that pulls the two frame
+    poses toward the calibrated relative pose. N relates the two member
+    cameras, while the parameter blocks are the frames of their reference
+    cameras, so the members' fixed within-rig offsets are composed into a
+    frame-level nominal first. The nominal is applied at its metric value:
+    the reconstruction is expected to arrive metrically scaled (hard-mode
+    averaging anchors scale from these same nominals). The observed/nominal
+    baseline ratio s* is only measured, and a warning fires when the
+    mismatch alone would cost more than one sigma per instant.
+
+    The residuals attach to the same pose buffers pycolmap is optimizing,
+    so the pull happens inside the existing BA solve.
+    """
+    index_at = {
+        (rig.sensor_of[idx], rig.frame_of[idx]): idx for idx in rig.sensor_of
+    }
+
+    for prior in rig.spec.soft_priors:
+        M_a = rig.sensor_from_ref_of(index_at[(prior.a, 0)])
+        M_b = rig.sensor_from_ref_of(index_at[(prior.b, 0)])
+        N_folded = np.linalg.inv(M_b) @ prior.b_from_a @ M_a
+
+        pairs = []
+        num_missing = 0
+        for instant in range(rig.spec.n_frames):
+            fa = rig.frame_id_of(index_at[(prior.a, instant)])
+            fb = rig.frame_id_of(index_at[(prior.b, instant)])
+            assert fa != fb, (
+                f"(_add_rig_prior_residuals): prior ({prior.a}, {prior.b}) "
+                f"resolves to one frame {fa} at instant {instant}"
+            )
+            if fa not in reconstruction.frames or fb not in reconstruction.frames:
+                num_missing += 1
+                continue
+            pairs.append((fa, fb))
+        assert pairs, (
+            f"(_add_rig_prior_residuals): no registered instant for "
+            f"prior ({prior.a}, {prior.b})"
+        )
+
+        t_norm = np.linalg.norm(N_folded[:3, 3])
+        assert t_norm > 1e-6, (
+            f"(_add_rig_prior_residuals): prior ({prior.a}, {prior.b}) has a "
+            f"co-located nominal, cannot infer reconstruction scale"
+        )
+
+        def frame_center(fid):
+            pose = reconstruction.frames[fid].rig_from_world
+            R = np.array(pose.rotation.matrix())
+            return -R.T @ np.array(pose.translation)
+
+        ratios = [
+            np.linalg.norm(frame_center(fb) - frame_center(fa)) / t_norm
+            for fa, fb in pairs
+        ]
+        s_star = float(np.median(ratios))
+
+        bias_sigma = abs(s_star - 1.0) * t_norm * prior.w_trans
+        if bias_sigma > 1.0:
+            logger.warning(
+                f"Soft prior ({prior.a}, {prior.b}): observed/nominal "
+                f"baseline ratio s*={s_star:.4f}, the scale mismatch alone "
+                f"costs {bias_sigma:.1f} sigma per instant; motion averaging "
+                f"likely did not pin metric scale"
+            )
+
+        num_added = 0
+        num_unblocked = 0
+        for fa, fb in pairs:
+            buf_a = reconstruction.frames[fa].rig_from_world.params
+            buf_b = reconstruction.frames[fb].rig_from_world.params
+            if not (
+                problem.has_parameter_block(buf_a)
+                and problem.has_parameter_block(buf_b)
+            ):
+                num_unblocked += 1
+                continue
+            cost = pygluemap.RelativePosePriorError(
+                N_folded[:3, :3],
+                N_folded[:3, 3],
+                prior.w_rot,
+                prior.w_trans,
+            )
+            problem.add_residual_block(cost, None, [buf_a, buf_b])
+            num_added += 1
+
+        logger.info(
+            f"Soft prior ({prior.a}, {prior.b}): {num_added} residuals, "
+            f"s*={s_star:.4f} ({min(ratios):.4f}..{max(ratios):.4f} over "
+            f"{len(ratios)} instants), {num_missing} unregistered, "
+            f"{num_unblocked} without pose blocks"
+        )
+
+
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -230,6 +339,7 @@ def bundle_adjustment(
     loss_type_normal: str = "huber",
     loss_type_virtual: str = "arctan",
     known_camera_ids: set[int] | None = None,
+    rig: "BoundRig | None" = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -327,6 +437,14 @@ def bundle_adjustment(
         f"{problem.num_parameter_blocks()} parameter blocks, "
         f"{problem.num_residuals()} residuals"
     )
+
+    if rig is not None and rig.spec.soft_priors:
+        _add_rig_prior_residuals(problem, reconstruction, rig)
+        logger.info(
+            f"After rig prior add: "
+            f"{problem.num_residual_blocks()} residual blocks, "
+            f"{problem.num_residuals()} residuals"
+        )
 
     # --- Solve -------------------------------------------------------------
     solver_options = ba_options.ceres.create_solver_options(ba_config, problem)

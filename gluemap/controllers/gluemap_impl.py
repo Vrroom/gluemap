@@ -410,7 +410,11 @@ def bind_rig_from_args(args: argparse.Namespace) -> None:
     rig_config_path = getattr(args, "rig_config_path", None)
     if rig_config_path is not None:
         spec = load_rig_spec(rig_config_path)
-        args.rig = bind_rig_spec(spec, get_image_list(args.images_path))
+        args.rig = bind_rig_spec(
+            spec,
+            get_image_list(args.images_path),
+            soft_averaging=getattr(args, "soft_rig_averaging", "free"),
+        )
     else:
         args.rig = None
 

@@ -52,7 +52,11 @@ class GlobalGluer:
         self.use_ceres_rotation_averaging = getattr(
             args, "use_ceres_rotation_averaging", False
         )
-        self.rig = getattr(args, "rig", None)
+        # Motion averaging folds with the averaging view: in "hard" mode the
+        # soft priors are promoted to exact rig structure here, while BA and
+        # the database writer keep consuming the original args.rig.
+        rig = getattr(args, "rig", None)
+        self.rig = rig.averaging_view() if rig is not None else None
 
     def main(
         self,

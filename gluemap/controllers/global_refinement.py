@@ -512,6 +512,7 @@ def run_refinement_pipeline(
             virtual_reconstruction,
             negative_depth_observations_1indexed,
             options=ba_options,
+            rig=getattr(args, "rig", None),
         )
         t_ba_end = time.perf_counter()
 

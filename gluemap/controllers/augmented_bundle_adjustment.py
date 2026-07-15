@@ -619,6 +619,7 @@ def iterative_bundle_adjustment(
     virtual_reconstruction: pycolmap.Reconstruction | None,
     negative_depth_observations: dict[int, set],
     options: IterativeBAOptions = None,
+    rig: BoundRig | None = None,
 ) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction | None]:
     """
     Run iterative bundle adjustment with reprojection error filtering.
@@ -711,6 +712,7 @@ def iterative_bundle_adjustment(
             negative_depth_observations,
             max_num_iterations=options.max_ba_iterations,
             known_camera_ids=options.known_camera_ids,
+            rig=rig,
         )
 
         # Inner loop: filter and tighten threshold when too few tracks filtered

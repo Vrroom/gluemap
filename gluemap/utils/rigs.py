@@ -1,3 +1,4 @@
+import logging
 import os
 from dataclasses import dataclass
 
@@ -6,6 +7,8 @@ import networkx as nx
 import numpy as np
 import torch
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -71,12 +74,138 @@ def fold_graph(G: nx.Graph, ref_of: dict) -> nx.MultiGraph:
     return F
 
 
+def glue_soft_priors(spec: RigSpec) -> RigSpec:
+    """Merge hard rigs connected by soft priors into single hard rigs, with
+    the nominal prior transforms treated as exact. This is the pretend-hard
+    structure that motion averaging folds with when soft rigs are promoted to
+    hard there; BA must keep working from the original spec, where the glued
+    rigs stay separate and the priors become residuals.
+
+    The priors must form a forest over the rigs: a cycle would carry two
+    composition paths between the same rigs with no guarantee they agree.
+    """
+    rig_index_of = {m: i for i, r in enumerate(spec.rigs) for m in r.members}
+    G = nx.Graph()
+    G.add_nodes_from(range(len(spec.rigs)))
+    for p in spec.soft_priors:
+        ra, rb = rig_index_of[p.a], rig_index_of[p.b]
+        assert not G.has_edge(ra, rb), (
+            f"(glue_soft_priors): two priors between rigs "
+            f"{spec.rigs[ra].name} and {spec.rigs[rb].name}"
+        )
+        G.add_edge(ra, rb, prior=p)
+    assert nx.is_forest(G), "(glue_soft_priors): soft priors form a cycle"
+
+    def member_matrix(sensor: str) -> np.ndarray:
+        r = spec.rigs[rig_index_of[sensor]]
+        return r.sensor_from_ref[r.members.index(sensor)]
+
+    merged = []
+    for comp in sorted(nx.connected_components(G), key=min):
+        rig_ids = sorted(comp)
+        root = rig_ids[0]
+        if len(rig_ids) == 1:
+            merged.append(spec.rigs[root])
+            continue
+
+        # Walk the prior tree outward from the root rig, composing each
+        # rig's reference pose onto the root reference: a prior (a, b, N)
+        # means cam_b = N o cam_a, so with member matrices M_a, M_b the
+        # unknown side's reference follows from the known side's.
+        ref_from_root = {root: np.eye(4)}
+        for u, v in nx.bfs_edges(G, root):
+            p = G.edges[u, v]["prior"]
+            ra, rb = rig_index_of[p.a], rig_index_of[p.b]
+            assert {ra, rb} == {u, v}, (
+                f"(glue_soft_priors): edge ({u}, {v}) carries prior for "
+                f"rigs ({ra}, {rb})"
+            )
+            M_a, M_b = member_matrix(p.a), member_matrix(p.b)
+            if ra == u:
+                ref_from_root[v] = (
+                    np.linalg.inv(M_b) @ p.b_from_a @ M_a @ ref_from_root[u]
+                )
+            else:
+                ref_from_root[v] = (
+                    np.linalg.inv(M_a)
+                    @ np.linalg.inv(p.b_from_a)
+                    @ M_b
+                    @ ref_from_root[u]
+                )
+
+        # Intrinsics concatenate in member order, so within one component
+        # the rigs must agree on declaring them.
+        declared = [spec.rigs[i].intrinsics is not None for i in rig_ids]
+        assert all(declared) or not any(declared), (
+            f"(glue_soft_priors): rigs "
+            f"{[spec.rigs[i].name for i in rig_ids]} mix declared and "
+            f"undeclared intrinsics"
+        )
+        members, mats, intrinsics = [], [], []
+        for i in rig_ids:
+            r = spec.rigs[i]
+            for m, M in zip(r.members, r.sensor_from_ref):
+                members.append(m)
+                mats.append(M @ ref_from_root[i])
+            if r.intrinsics is not None:
+                intrinsics += list(r.intrinsics)
+        assert np.allclose(mats[0], np.eye(4)), (
+            f"(glue_soft_priors): merged rig {spec.rigs[root].name} lost its "
+            f"identity reference"
+        )
+        merged.append(
+            Rig(
+                spec.rigs[root].name,
+                members,
+                mats,
+                intrinsics if intrinsics else None,
+            )
+        )
+
+    return RigSpec(spec.sensors, merged, [], spec.images)
+
+
 @dataclass(frozen=True)
 class BoundRig:
     spec: RigSpec
     ref_of: dict[int, int]
     sensor_of: dict[int, str]
     frame_of: dict[int, int]
+    soft_averaging: str = "free"
+
+    def averaging_view(self) -> "BoundRig":
+        """The rig structure motion averaging should fold with. In "free"
+        mode soft priors stay out of averaging (they act only as BA
+        residuals) and the view is this instance itself. In "hard" mode the
+        priors are applied as exact transforms: rigs glued along them become
+        one hard rig at the nominal, so averaging couples their evidence and
+        their nominal baselines can anchor metric scale. BA and the database
+        writer must keep using this original instance, never the view."""
+        if self.soft_averaging == "free" or not self.spec.soft_priors:
+            return self
+        glued = glue_soft_priors(self.spec)
+        logger.info(
+            f"soft_rig_averaging=hard: treating "
+            f"{len(self.spec.soft_priors)} soft prior(s) as exact in motion "
+            f"averaging, gluing rigs {[r.name for r in self.spec.rigs]} "
+            f"-> {[r.name for r in glued.rigs]}; BA still sees them as soft"
+        )
+        index_at = {
+            (self.sensor_of[idx], self.frame_of[idx]): idx
+            for idx in self.sensor_of
+        }
+        ref_of = {
+            idx: index_at[
+                (
+                    glued.rig_of_sensor(self.sensor_of[idx]).members[0],
+                    self.frame_of[idx],
+                )
+            ]
+            for idx in self.sensor_of
+        }
+        return BoundRig(
+            glued, ref_of, self.sensor_of, self.frame_of, self.soft_averaging
+        )
 
     def sensor_from_ref_of(self, idx: int) -> np.ndarray:
         sensor = self.sensor_of[idx]
@@ -162,7 +291,15 @@ def fold_relative_poses(
     raise NotImplementedError
 
 
-def bind_rig_spec(spec: RigSpec, image_paths: list[str]) -> BoundRig:
+def bind_rig_spec(
+    spec: RigSpec,
+    image_paths: list[str],
+    soft_averaging: str = "free",
+) -> BoundRig:
+    assert soft_averaging in ("free", "hard"), (
+        f"(bind_rig_spec): soft_averaging must be 'free' or 'hard', "
+        f"got {soft_averaging!r}"
+    )
     spec_paths = {p for paths in spec.images.values() for p in paths}
     assert set(image_paths) == spec_paths, (
         f"(bind_rig_spec): dataset images differ from spec images, "
@@ -182,7 +319,7 @@ def bind_rig_spec(spec: RigSpec, image_paths: list[str]) -> BoundRig:
         idx: index_at[(spec.rig_of_sensor(sensor_of[idx]).members[0], frame_of[idx])]
         for idx in sensor_of
     }
-    return BoundRig(spec, ref_of, sensor_of, frame_of)
+    return BoundRig(spec, ref_of, sensor_of, frame_of, soft_averaging)
 
 
 def compute_world_space_rig_offset(
