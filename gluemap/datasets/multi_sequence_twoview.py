@@ -201,7 +201,11 @@ class MultiSequencePairs(DemoBaseDataset):
         if os.path.exists(descriptors_path):
             descriptors_db = torch.load(descriptors_path, weights_only=False)
         else:
-            descriptors_db = None
+            raise FileNotFoundError(
+                f"SALAD descriptors not found at {descriptors_path}. "
+                "Run multi-sequence preprocessing first, or set "
+                "rerun_from: retrieval to regenerate descriptor caches."
+            )
 
         neighbors = establish_neighbors_sequential(
             img_list, num_neighbors=args.num_neighbors_sequential

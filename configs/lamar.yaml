@@ -10,12 +10,13 @@ is_sequential: true
 is_multi_sequence: true
 subfolder_regex: "^ios"  # regex to filter subfolders for multi-sequence
 max_num_tracks: 4_000_000
+use_ceres_rotation_averaging: true
 
 # Dataset groups: one per LaMAR scene (CAB, HGE, LIN)
 dataset_groups:
   - name: "LaMAR"
-    images_pattern: "../datasets/lamar/{dataset}/map/"
-    gt_pattern: "../datasets/lamar/{dataset}/sfm_empty"
+    images_pattern: "./datasets/lamar/{dataset}/map/"
+    gt_pattern: "./datasets/lamar/{dataset}/sfm_empty"
     output_pattern: "results/lamar/{dataset}"
 
 # Benchmark options

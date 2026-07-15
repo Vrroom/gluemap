@@ -175,10 +175,13 @@ class SaladRetrievalPipeline:
         t0 = time.perf_counter()
 
         images_path_root = self.args.images_path
+        processed_root = self.args.curr_processed or self.args.write_path
+        curr_path_root = self.args.write_path
         retrieval_times = {}
         for dataset in datasets:
             self.args.images_path = f"{images_path_root}/{dataset}"
-            self.args.curr_path = f"{self.args.write_path}/{dataset}"
+            self.args.curr_processed = f"{processed_root}/{dataset}"
+            self.args.curr_path = f"{curr_path_root}/{dataset}"
             self._maybe_delete_retrieval_cache()
             t_ds_start = time.perf_counter()
             self._run_retrieval()
@@ -187,8 +190,8 @@ class SaladRetrievalPipeline:
 
         # Restore original paths
         self.args.images_path = images_path_root
-        self.args.curr_processed = self.args.write_path
-        self.args.curr_path = self.args.write_path
+        self.args.curr_processed = processed_root
+        self.args.curr_path = curr_path_root
 
         t2 = time.perf_counter()
         # Model loading is lazy and happens on the first cache-miss dataset.
