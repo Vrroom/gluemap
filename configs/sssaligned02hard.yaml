@@ -1,0 +1,5 @@
+_base_: base.yaml
+images_path: /home/salmonuser/DigitalTwins/gluemap/Debug/SSSAligned02Hard/images/
+write_path: results/scenes/SSSAligned02Hard/
+rig_config_path: /home/salmonuser/DigitalTwins/gluemap/Debug/SSSAligned02Hard/schema.yaml
+gt_intrinsics_path: null

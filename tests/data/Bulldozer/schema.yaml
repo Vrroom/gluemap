@@ -1,0 +1,21 @@
+n_sensors: 4
+sensors: [cam0, cam1, cam2, cam3]
+rigs:
+- name: fan4
+  members: [cam0, cam1, cam2, cam3]
+  sensor_from_ref:
+  - [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+  - [[0.93969261861, -1.0803579732e-17, 0.342020145396, 2.05211994707], [4.41616844068e-09, 1, -1.74577502406e-08, -3.73740544068e-08], [-0.342020152932, -4.43990870339e-19, 0.939692631315, -0.361845909091], [0, 0, 0, 1]]
+  - [[0.766044433626, 3.67295963093e-18, 0.642787614103, 3.85672548746], [1.80164618274e-08, 1, -1.36199287511e-08, -1.4347107391e-08], [-0.642787638242, 7.62315174649e-18, 0.766044440115, -1.40373485837], [0, 0, 0, 1]]
+  - [[0.49999998091, 1.01003045531e-17, 0.866025405662, 5.19615143729], [4.60638197779e-09, 1, -2.1724195178e-09, -5.33955480941e-08], [-0.866025425182, 1.67800130664e-18, 0.499999983043, -2.9999995485], [0, 0, 0, 1]]
+  intrinsics:
+  - {fx: 256, fy: 256, cx: 256, cy: 256, width: 512, height: 512}
+  - {fx: 341.333333333, fy: 341.333333333, cx: 256, cy: 256, width: 512, height: 512}
+  - {fx: 426.666666667, fy: 426.666666667, cx: 256, cy: 256, width: 512, height: 512}
+  - {fx: 512, fy: 512, cx: 256, cy: 256, width: 512, height: 512}
+soft_priors: []
+images:
+  cam0: [/home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f0.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f1.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f2.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f3.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f4.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f5.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f6.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam0_f7.png]
+  cam1: [/home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f0.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f1.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f2.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f3.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f4.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f5.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f6.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam1_f7.png]
+  cam2: [/home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f0.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f1.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f2.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f3.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f4.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f5.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f6.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam2_f7.png]
+  cam3: [/home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f0.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f1.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f2.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f3.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f4.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f5.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f6.png, /home/salmonuser/DigitalTwins/gluemap/tests/data/Bulldozer/images/cam3_f7.png]

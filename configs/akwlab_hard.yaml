@@ -1,0 +1,14 @@
+# AKW Lab, fully hard rig: cam_phone + 5 cube faces (cam_down dropped) are
+# all members of the single "iphone360" rig (no soft priors, so
+# soft_rig_averaging is moot). Currently pointed at the 5-frame Mini subset.
+# Run with: gluemap-demo --config configs/akwlab_hard.yaml
+
+_base_: base.yaml
+
+# IO
+images_path: /home/salmonuser/DigitalTwins/gluemap/Debug/AKWLabHard/images/
+write_path: results/scenes/AKWLabHard/
+rig_config_path: /home/salmonuser/DigitalTwins/gluemap/Debug/AKWLabHard/schema.yaml
+
+# Ground truth intrinsics
+gt_intrinsics_path: null

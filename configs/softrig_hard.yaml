@@ -1,0 +1,20 @@
+# SoftRigClassroom with soft priors promoted to hard rig structure in motion
+# averaging. Writes to its own directory so the free-mode baseline in
+# results/scenes/SoftRigClassroom/ stays untouched; the write dir is seeded
+# with the baseline's inference caches, so run with --force_load to reuse
+# retrieval, doppelgangers, star inference, and the SIFT database:
+#   gluemap-demo --config configs/softrig_hard.yaml --force_load
+
+_base_: base.yaml
+
+# IO
+images_path: /home/salmonuser/DigitalTwins/gluemap/Debug/SoftRigClassroom/images/
+write_path: results/scenes/SoftRigClassroom_hard/
+rig_config_path: /home/salmonuser/DigitalTwins/gluemap/Debug/SoftRigClassroom/schema.yaml
+
+# Ground truth intrinsics
+gt_intrinsics_path: null
+
+# Treat soft priors as exact rig structure during motion averaging
+# ("free" keeps them out of averaging; BA sees them as soft either way).
+soft_rig_averaging: hard

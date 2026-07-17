@@ -5,9 +5,13 @@
 _base_: base.yaml
 
 # IO
-images_path: /home/salmonuser/DigitalTwins/gluemap/Debug/LegoTractor/images/
-write_path: results/legotractor/
-rig_config_path: /home/salmonuser/DigitalTwins/gluemap/Debug/LegoTractor/schema.yaml
+images_path: /home/salmonuser/DigitalTwins/gluemap/Debug/SoftRigClassroom/images/
+write_path: results/scenes/SoftRigClassroom/
+rig_config_path: /home/salmonuser/DigitalTwins/gluemap/Debug/SoftRigClassroom/schema.yaml
+
+# Treat soft priors as exact rig structure during motion averaging
+# ("free" keeps them out of averaging; BA sees them as soft either way).
+soft_rig_averaging: hard
 
 # Ground truth intrinsics
 gt_intrinsics_path: null
