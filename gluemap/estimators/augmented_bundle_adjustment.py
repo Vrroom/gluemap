@@ -259,9 +259,14 @@ def _add_rig_prior_residuals(
         M_b = rig.sensor_from_ref_of(index_at[(prior.b, 0)])
         N_folded = np.linalg.inv(M_b) @ prior.b_from_a @ M_a
 
+        n_instants = len(rig.spec.images[prior.a])
+        assert n_instants == len(rig.spec.images[prior.b]), (
+            f"(_add_rig_prior_residuals): prior ({prior.a}, {prior.b}) links "
+            f"sensors with {n_instants} vs {len(rig.spec.images[prior.b])} frames"
+        )
         pairs = []
         num_missing = 0
-        for instant in range(rig.spec.n_frames):
+        for instant in range(n_instants):
             fa = rig.frame_id_of(index_at[(prior.a, instant)])
             fb = rig.frame_id_of(index_at[(prior.b, instant)])
             assert fa != fb, (

@@ -37,7 +37,7 @@ def test_bulldozer_round_trip():
     spec = load_rig_spec(FIXTURE)
     rig = spec.rigs[0]
     assert spec.sensors == ["cam0", "cam1", "cam2", "cam3"]
-    assert spec.n_frames == 8
+    assert len(spec.images[rig.members[0]]) == 8
     assert rig.name == "fan4"
     expected_fx = [256.0, 1024.0 / 3, 1280.0 / 3, 512.0]
     for K, fx in zip(rig.intrinsics, expected_fx):

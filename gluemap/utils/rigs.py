@@ -45,10 +45,6 @@ class RigSpec:
     soft_priors: list[SoftPrior]
     images: dict[str, list[str]]
 
-    @property
-    def n_frames(self) -> int:
-        return len(self.images[self.sensors[0]])
-
     def rig_of_sensor(self, sensor: str) -> Rig:
         rig = next((r for r in self.rigs if sensor in r.members), None)
         assert rig is not None, f"(rig_of_sensor): unknown sensor {sensor}"
@@ -300,6 +296,14 @@ def bind_rig_spec(
         f"(bind_rig_spec): soft_averaging must be 'free' or 'hard', "
         f"got {soft_averaging!r}"
     )
+    if soft_averaging == "free":
+        for p in spec.soft_priors:
+            assert p.w_rot == 1.0 and p.w_trans == 1.0, (
+                f"(bind_rig_spec): prior ({p.a}, {p.b}) carries calibrated weights "
+                f"w_rot={p.w_rot} w_trans={p.w_trans} but soft_rig_averaging is "
+                f"'free', so the prior never anchors averaging and scale stays a "
+                f"free gauge; set soft_rig_averaging: hard or use weights 1.0"
+            )
     spec_paths = {p for paths in spec.images.values() for p in paths}
     assert set(image_paths) == spec_paths, (
         f"(bind_rig_spec): dataset images differ from spec images, "
@@ -456,13 +460,23 @@ def load_rig_spec(path: str) -> RigSpec:
     assert set(images) == set(sensors), (
         f"(load_rig_spec): images keys {sorted(images)} != sensors {sorted(sensors)}"
     )
-    n_frames = len(images[sensors[0]])
-    assert n_frames > 0, f"(load_rig_spec): sensor {sensors[0]} has an empty image list"
+    frames_of = [len(images[r.members[0]]) for r in rigs]
+    for r, n in zip(rigs, frames_of):
+        assert n > 0, f"(load_rig_spec): rig {r.name} has an empty image list"
+    for p in soft_priors:
+        ra, rb = rig_of[p.a], rig_of[p.b]
+        assert frames_of[ra] == frames_of[rb], (
+            f"(load_rig_spec): soft prior ({p.a}, {p.b}) links rigs with "
+            f"{frames_of[ra]} vs {frames_of[rb]} frames, priors pair instants "
+            f"so their rigs must be frame-aligned"
+        )
     all_paths = []
     for s in sensors:
         paths = images[s]
+        n_frames = frames_of[rig_of[s]]
         assert len(paths) == n_frames, (
-            f"(load_rig_spec): sensor {s} has {len(paths)} images, expected {n_frames}"
+            f"(load_rig_spec): sensor {s} has {len(paths)} images, "
+            f"expected {n_frames} for rig {rigs[rig_of[s]].name}"
         )
         for p in paths:
             assert isinstance(p, str), f"(load_rig_spec): sensor {s} has non-string image entry {p!r}"
@@ -486,10 +500,11 @@ def load_rig_spec(path: str) -> RigSpec:
 if __name__ == "__main__":
     spec = load_rig_spec("/home/salmonuser/DigitalTwins/gluemap/Debug/Bathroom/schema.yaml")
     rig = spec.rigs[0]
-    print(f"{len(spec.sensors)} sensors, {spec.n_frames} frames, rig {rig.name}, ref {rig.members[0]}")
+    n_frames = len(spec.images[rig.members[0]])
+    print(f"{len(spec.sensors)} sensors, {n_frames} frames, rig {rig.name}, ref {rig.members[0]}")
     for member, M in zip(rig.members, rig.sensor_from_ref):
         print(f"{member} sensor_from_ref[:3] = {M[:3].tolist()}")
     last = spec.sensors[-1]
-    image = spec.images[last][spec.n_frames - 1]
+    image = spec.images[last][len(spec.images[last]) - 1]
     print(f"{image} -> {spec.sensor_of_image(image)}")
     print(f"rig_of_sensor({last}) -> {spec.rig_of_sensor(last).name}")
