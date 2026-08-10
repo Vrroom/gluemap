@@ -1,16 +1,15 @@
-"""Calibrate an iPhone+360 video take, export it as gluemap Debug scenes (a hard
-rig and a 2-rig variant with a soft prior), and optionally reconstruct them.
+"""Calibrate an iPhone+360 video take, export it as gluemap Debug scenes (a
+2-rig variant with a soft prior, full and mini), and optionally reconstruct them.
 
 Run from the gluemap root in the gluemap env:
 
     conda run -n gluemap python captureTools/pipeline.py \
-        <run_dir> <out_root> [--name AKWLab] [--n 50] [--run Hard MiniHard]
+        <run_dir> <out_root> [--name AKWLab] [--n 50] [--run Soft MiniSoft]
 """
 
 import argparse
 import json
 import os
-import shutil
 import subprocess
 
 import cv2
@@ -158,27 +157,17 @@ def write_poses(path, poses):
         json.dump(doc, f, indent=2)
 
 
-def export_scene_pair(take, c, psi, k, r_roll, phone_k, n, out_root, name, w_rot, w_trans, rig):
-    hard_dir = os.path.join(out_root, f"{name}Hard")
+def export_scene(take, c, psi, k, r_roll, phone_k, n, out_root, name, w_rot, w_trans, rig):
     soft_dir = os.path.join(out_root, f"{name}Soft")
-    hard_images, poses = export_frame_images(take, psi, r_roll, k, n, os.path.join(hard_dir, "images"), rig)
-    shutil.copytree(os.path.join(hard_dir, "images"), os.path.join(soft_dir, "images"),
-                    dirs_exist_ok=True)
-    write_poses(os.path.join(hard_dir, "poses.json"), poses)
+    soft_images, poses = export_frame_images(take, psi, r_roll, k, n,
+                                             os.path.join(soft_dir, "images"), rig)
     write_poses(os.path.join(soft_dir, "poses.json"), poses)
-    soft_images = {s: [p.replace(hard_dir, soft_dir) for p in paths]
-                   for s, paths in hard_images.items()}
 
     sensors = rig["sensors"]
     mats = sensor_from_ref_matrices(c, r_roll, rig["faces"])
     by_sensor = {"cam_phone": mats["phone"], **{f"cam_{nm}": mats[nm] for nm, _, _ in rig["faces"]}}
     intr = {"cam_phone": phone_k,
             **{f"cam_{nm}": face_intrinsics(fov_deg=fov) for nm, _, fov in rig["faces"]}}
-    hard_rigs = [{"name": "iphone360", "members": sensors,
-                  "sensor_from_ref": [by_sensor[s] for s in sensors],
-                  "intrinsics": [intr[s] for s in sensors]}]
-    write_schema(os.path.join(hard_dir, "schema.yaml"), sensors, hard_rigs, [], hard_images)
-
     ring = sensors[1:]
     rebased = rebase_sensor_from_ref(by_sensor, ring)
     soft_rigs = [{"name": "iphone", "members": [sensors[0]], "sensor_from_ref": [np.eye(4)],
@@ -189,7 +178,7 @@ def export_scene_pair(take, c, psi, k, r_roll, phone_k, n, out_root, name, w_rot
     prior = {"pair": [sensors[0], ring[0]], "b_from_a": by_sensor[ring[0]],
              "w_rot": w_rot, "w_trans": w_trans}
     write_schema(os.path.join(soft_dir, "schema.yaml"), sensors, soft_rigs, [prior], soft_images)
-    print(f"(export_scene_pair): wrote {hard_dir} + {soft_dir} ({n} instants)")
+    print(f"(export_scene): wrote {soft_dir} ({n} instants)")
 
 
 def write_demo_config(scene_dir, configs_dir="configs"):
@@ -198,7 +187,8 @@ def write_demo_config(scene_dir, configs_dir="configs"):
            "images_path": os.path.abspath(os.path.join(scene_dir, "images")) + "/",
            "write_path": f"results/scenes/{scene}/",
            "rig_config_path": os.path.abspath(os.path.join(scene_dir, "schema.yaml")),
-           "gt_intrinsics_path": None}
+           "gt_intrinsics_path": None,
+           "soft_rig_averaging": "hard"}
     path = os.path.join(configs_dir, f"{scene.lower()}.yaml")
     with open(path, "w") as f:
         yaml.safe_dump(doc, f, default_flow_style=False, sort_keys=False)
@@ -224,7 +214,9 @@ def main():
     ap.add_argument("--w-rot", type=float, default=1.0)
     ap.add_argument("--w-trans", type=float, default=1.0)
     ap.add_argument("--run", nargs="*", default=[],
-                    choices=["Hard", "Soft", "MiniHard", "MiniSoft"])
+                    choices=["Soft", "MiniSoft"])
+    ap.add_argument("--write-config", nargs="*", default=[],
+                    choices=["Soft", "MiniSoft"])
     ap.add_argument("--rig", default="cube", choices=["cube", "azimuth_top", "cube_low"])
     ap.add_argument("--num-workers", type=int, default=None)
     args = ap.parse_args()
@@ -243,8 +235,10 @@ def main():
            "azimuth_top": lambda: rig_spec(azimuth_top(), "aztop360"),
            "cube_low": lambda: rig_spec(cube_low(), "cubelow360")}[args.rig]()
     for name, n in [(args.name, args.n), (args.name + "Mini", args.n_mini)]:
-        export_scene_pair(take, c, psi_rel, k, r_roll, phone_k, n, args.out_root, name,
+        export_scene(take, c, psi_rel, k, r_roll, phone_k, n, args.out_root, name,
                           args.w_rot, args.w_trans, rig)
+    for variant in args.write_config:
+        write_demo_config(os.path.join(args.out_root, args.name + variant))
     for variant in args.run:
         cfg = write_demo_config(os.path.join(args.out_root, args.name + variant))
         run_gluemap(cfg, args.num_workers)
