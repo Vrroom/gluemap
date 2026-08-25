@@ -7,6 +7,7 @@ global centre and scale before similarity averaging refines them.
 """
 
 from collections.abc import Callable
+from copy import deepcopy
 
 import networkx as nx
 import numpy as np
@@ -319,12 +320,45 @@ def seed_star_scales(
     return global_scales, metric_stars
 
 
+def reconnect_folded_graph(
+    folded_graph: nx.Graph,
+    rel_poses_uni: dict,
+    rig: BoundRig,
+    metric_stars: set[int],
+) -> list[tuple[int, int]]:
+    """Bridge the components of the folded graph with one-sided pairs, highest
+    score first. Returns the pairs that were added."""
+    added = []
+    while not nx.is_connected(folded_graph):
+        label = {
+            n: k
+            for k, comp in enumerate(nx.connected_components(folded_graph))
+            for n in comp
+        }
+        best = None
+        for pair, (_pose, star, _slot, score) in rel_poses_uni.items():
+            ra, rb = rig.ref_of[pair[0]], rig.ref_of[pair[1]]
+            if label[ra] == label[rb]:
+                continue
+            if best is None or score > best[0]:
+                best = (score, pair, star, ra, rb)
+        if best is None:
+            break
+        score, pair, star, ra, rb = best
+        folded_graph.add_edge(
+            ra, rb, weight=score, pair=pair, choice=(star in metric_stars, score)
+        )
+        added.append(pair)
+    return added
+
+
 def walk_reference_centers(
     rel_poses: dict,
     global_rotations: dict[int, np.ndarray],
     global_scales: dict[int, float],
     rig: BoundRig,
     metric_stars: set[int],
+    rel_poses_uni_dx_copy: dict,
 ) -> dict[int, np.ndarray]:
     """Walk the folded reference MST, setting each reference centre from its
     parent's. ``metric_stars`` marks the stars whose scale is measured against
@@ -370,9 +404,19 @@ def walk_reference_centers(
             edge["pair"] = data["pair"]
             edge["choice"] = candidate
 
+    added = reconnect_folded_graph(
+        folded_graph, rel_poses_uni_dx_copy, rig, metric_stars
+    )
+    if added:
+        print(
+            f"(walk_reference_centers): bridged the folded graph with "
+            f"{len(added)} one-sided pair(s): {added}"
+        )
+
     assert nx.is_connected(folded_graph), (
-        f"(walk_reference_centers): folded reference graph is disconnected, "
-        f"{nx.number_connected_components(folded_graph)} components"
+        f"(walk_reference_centers): folded reference graph still has "
+        f"{nx.number_connected_components(folded_graph)} components after "
+        f"adding {len(added)} one-sided bridge(s); nothing bridges the rest"
     )
 
     # Max spanning tree over the references
@@ -384,22 +428,37 @@ def walk_reference_centers(
     global_centers = {}
     global_centers[root] = np.zeros((3,), dtype=np.float64)
 
+    # Reconnect edges come from pairs that were dropped from rel_poses for
+    # having no scale ratio, so placement has to look in both dicts.
+    poses_by_pair = {**rel_poses, **rel_poses_uni_dx_copy}
+
     def visit(node, neighbor):
         i, j = mst[node][neighbor]["pair"]
         if rig.ref_of[i] != node:
             i, j = j, i
 
+        # A one-sided pair was stored in only one direction, so the key we
+        # want may not exist. The same relation read backwards places the
+        # parent from the child, so the step is just negated below.
+        forward = (i, j) in poses_by_pair
+        if not forward:
+            i, j = j, i
+        assert (i, j) in poses_by_pair, (
+            f"(walk_reference_centers::visit): no pose for {(i, j)}"
+        )
+
         # Diagram in my head: node -> i -> j -> neighbor
-        pose, star, _slot, _score = rel_poses[(i, j)]
+        pose, star, _slot, _score = poses_by_pair[(i, j)]
         t_hat = -global_rotations[j].T @ pose[:3, 3].numpy()
         s = global_scales[star]
 
         delta_i = compute_world_space_rig_offset(rig, global_rotations, i)
         delta_j = compute_world_space_rig_offset(rig, global_rotations, j)
 
-        global_centers[neighbor] = (
-            global_centers[node] + t_hat / s + delta_i - delta_j
-        )
+        step = t_hat / s + delta_i - delta_j
+        if not forward:
+            step = -step
+        global_centers[neighbor] = global_centers[node] + step
 
     walk_tree(mst, root, visit)
 
@@ -511,6 +570,17 @@ def initialize_mst_structures_with_rig(
         if (node_idx_to_star_idx[i], node_idx_to_star_idx[j]) not in scales:
             invalid_edges.append((i, j))
 
+    # There is no scale info in these edges but there is usable relative pose.
+    rel_poses_uni_dx_copy = {
+        (i, j): deepcopy(rel_poses[(i, j)]) for i, j in invalid_edges
+    }
+
+    # The two-sided penalty was not applied on these.
+    for pair, (pose, star, slot, score) in rel_poses_uni_dx_copy.items():
+        angle = predictions_dict["median_tri_angle"][star][slot - 1]
+        factor = float(min(20, angle) / 20)
+        rel_poses_uni_dx_copy[pair] = (pose, star, slot, score * factor)
+
     for i, j in invalid_edges:
         del rel_poses[(i, j)]
 
@@ -529,7 +599,7 @@ def initialize_mst_structures_with_rig(
         G, scales, node_idx_to_star_idx, components, anchors
     )
     reference_centers = walk_reference_centers(
-        rel_poses, global_rotations, global_scales, rig, metric_stars
+        rel_poses, global_rotations, global_scales, rig, metric_stars, rel_poses_uni_dx_copy=rel_poses_uni_dx_copy
     )
     global_centers = add_member_centers(reference_centers, global_rotations, rig)
 
