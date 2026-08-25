@@ -1,8 +1,12 @@
+import logging
+
 import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation
+
+logger = logging.getLogger(__name__)
 
 
 def rotation_matrix_to_quaternion(
@@ -78,10 +82,13 @@ def average_rotations_so3(
     residuals = residuals_to(mean)
     if max_residual_deg is not None:
         keep = residuals <= max_residual_deg
-        assert keep.any(), (
-            f"(average_rotations_so3): all members rejected at {max_residual_deg} deg, residuals {residuals}"
-        )
-        if not keep.all():
+        if not keep.any():
+            logger.warning(
+                f"(average_rotations_so3): all members rejected at "
+                f"{max_residual_deg} deg, residuals {residuals}; falling back "
+                f"to the weighted mean of all members"
+            )
+        elif not keep.all():
             mean = Rotation.from_matrix(rotations[keep]).mean(weights=weights[keep])
             residuals = residuals_to(mean)
     return mean.as_matrix(), residuals

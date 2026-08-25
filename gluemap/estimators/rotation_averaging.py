@@ -415,16 +415,26 @@ def rotation_averaging_pycolmap_with_rig(
         T = np.linalg.inv(Ms[idx2]) @ T @ Ms[idx1]
         if r1 > r2:
             T = np.linalg.inv(T)
-        bundles.setdefault((min(r1, r2), max(r1, r2)), []).append((T, score)) # multi-edges appended to list
+        bundles.setdefault((min(r1, r2), max(r1, r2)), []).append((T, score, idx1, idx2)) # multi-edges appended to list
 
     # Do rotation averaging of multi-edges
     reject_deg = 2.0 * max_rotation_error_deg
     merged = {}
     for pair, bundle in bundles.items():
-        Rs = np.stack([T[:3, :3] for T, _ in bundle])
-        ws = np.array([s for _, s in bundle])
+        Rs = np.stack([T[:3, :3] for T, _, _, _ in bundle])
+        ws = np.array([s for _, s, _, _ in bundle])
         R_mean, residuals = average_rotations_so3(Rs, ws, max_residual_deg=reject_deg)
         inliers = residuals <= reject_deg
+        if not inliers.any():
+            edge_desc = ", ".join(
+                f"(img {i1} <-> img {i2}, score={s:.3f})" for _, s, i1, i2 in bundle
+            )
+            logger.warning(
+                f"rig bundle {pair} (rig refs {pair[0]} <-> {pair[1]}): all edges "
+                f"[{edge_desc}] mutually inconsistent (residuals "
+                f"{np.round(residuals, 2)} deg > {reject_deg} deg); using their "
+                f"weighted mean with minimal weight"
+            )
         merged[pair] = (R_mean, float(ws[inliers].sum()))
         logger.debug(
             f"rig bundle {pair}: {len(bundle)} edges, "
